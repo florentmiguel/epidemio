@@ -36,6 +36,18 @@ protection. La **pluie cumulée depuis une date** est un fait météo neutre que
 lessivage, propre à chaque produit, reste à l'OAD. Aucune donnée de traitement n'entre dans le moteur.
 
 ## Infections secondaires (v0)
+**Vocabulaire : trois étapes à ne pas confondre.**
+1. **Fructification** (ce que le moteur et les textes de référence appellent « sporulation ») : les sporanges *apparaissent*
+   sur la tache, c'est le duvet blanc. Le texte suisse le dit (« les sporanges apparaissent si HR > 92 %, T >= 12 °C,
+   4 h, dans l'obscurité ») ; Plasmopy aussi (étape « Sporulation », suivie de la densité de sporanges). Le critère
+   HR / durée porte donc sur l'apparition du duvet blanc, que le terrain permet d'observer.
+2. **Libération des sporanges** (détachement et dispersion par la pluie et le vent) : des sporanges peuvent se former sans
+   être détachés ni dispersés. Le moteur ne la modélise que par l'option `pluie_detachement_mm` ; par défaut, comme
+   Plasmopy et Rossi et al. 2021, il suppose qu'elle a toujours lieu.
+3. **Libération des zoospores et infection** : lorsqu'un sporange arrive sur une feuille saine mouillée (T × h >= 50).
+   C'est l'infection secondaire du moteur.
+Observer une fructification valide donc l'étape 1 seulement ; elle ne dit rien des étapes 2 et 3.
+
 Après la première sporulation d'une tache, le moteur enchaîne les générations suivantes :
 * **Sources** : chaque *nuit* de sporulation d'une tache (HR ≥ 92 %, T ≥ 12 °C, ≥ 4 h d'obscurité, pendant les 15 jours
   de vie de la tache) produit des sporanges, disponibles tant qu'ils survivent (voir plus bas). Toutes les nuits comptent.
@@ -107,8 +119,9 @@ infection secondaire par chaîne (la première après la sporulation) ; nous lis
 | Infection du 12/09 07 h (52,3) | absente | présente (source P20) | non expliqué (Plasmopy : une seule par chaîne ? seuil ?) |
 | Durée de vie des spores | 12,5 / 17,1 / 15,7 jours | 3,5 à 5,4 jours (équations de Blaeser & Weltzien) | écart important, voir ci-dessous |
 
-* Total moteur : 13 infections secondaires (11 de génération 1, 2 de génération 2). Aucune avant le 28/08 : aucune nuit de
-  sporulation pendant la vie des taches de mai-juin, ce qui concorde avec l'absence de fructification observée au champ.
+* Total moteur : 13 infections secondaires (11 de génération 1, 2 de génération 2). Aucune avant le 28/08 : avec HR >= 92 %,
+  aucune nuit de sporulation pendant la vie des taches de mai-juin. **Ce critère a ensuite été écarté** : le terrain montre
+  une fructification faible mais non nulle (voir « Observation de terrain »).
 * Plasmopy : `sporangia_densities` vaut 300000 pour toutes les chaînes (valeur plafond, non utile à la comparaison).
 * **Durée de vie des spores** : celle de Plasmopy (12 à 17 jours) dépasse la littérature (2 à 9 jours selon Brischetto 2020 ;
   zoospores libérés jusqu'à 7 jours, plus d'infection à 10 jours selon Kast & Stark-Urnau 1999).
@@ -174,8 +187,8 @@ médian : notre « maturité acquise le 23 avril » correspond à environ la moi
 | **Conditions de sporulation** | texte/Plasmopy ; Franche (6 h, HR > 90 %) ; Rossi (3 h, HR >= 80 %, T >= 10 °C) | **28/08 ; 03/06 ; 22/05** | 14 ; 11 ; 38 | **le paramètre décisif** |
 
 La date de la première infection secondaire ne dépend que du critère de sporulation. Avec celui du texte de travail et de
-Plasmopy, aucune nuit de sporulation n'a lieu pendant la vie des taches de mai-juin, ce qui concorde avec l'absence de
-fructification observée au champ (sous protection : preuve partielle).
+Plasmopy (HR >= 92 %), aucune nuit de sporulation n'a lieu pendant la vie des taches de mai-juin : ce qui **contredit** le
+terrain, où une fructification faible mais non nulle a été vue (voir « Observation de terrain »).
 
 **Observation de terrain** (clients de Florent, même programme phytosanitaire, 2026) : sortie de taches d'huile en mai-juin
 **sans fructification marquée, mais pas nulle**. Elle écarte les deux extrêmes : le critère du texte de travail prédit zéro
@@ -206,6 +219,24 @@ sporulation distinctes / taches concernées :
   cycles. « 2 / 4 » signifie : 2 nuits favorables dans la fenêtre, 4 cohortes de taches qui en ont profité.
   `--detail HR DUREE` (ex. `--detail 90 4`) liste ces cycles avec leurs dates d'infection, d'apparition des taches et de
   sporulation, y compris ceux dont les taches sont vivantes mais sans nuit favorable.
+* **Détail réel, saison 2026** (`--detail 90 4`, fenêtre 20/05 au 30/06). Cinq cycles primaires ont des taches vivantes :
+
+| Cycle | Infection | Taches visibles | Vivantes jusqu'au | Nuit de sporulation |
+|---|---|---|---|---|
+| #1 | 03/05 | 21/05 | 05/06 | 02/06 |
+| #3 | 10/05 | 24/05 | 08/06 | 02/06 |
+| #5 | 17/05 | 24/05 | 08/06 | 02/06 |
+| #8 | 02/06 | 12/06 | 27/06 | 18/06 |
+| #13 | 19/06 | 24/06 | 09/07 | aucune |
+
+  Les trois cohortes de mai apparaissent du 21 au 24 mai, ce qui concorde avec les taches observées du 20/05 au 06/06.
+  **Une seule nuit, le 02/06, fait sporuler les trois à la fois** : la fructification de mai est donc « faible mais non
+  nulle » au sens strict, ce qui concorde avec l'observation. À HR >= 92 % les cinq cycles n'ont aucune nuit (0 / 5).
+  **L'observation ne valide que l'étape de sporulation.** Une fructification n'est pas une contamination secondaire :
+  celle-ci exige encore des sporanges dispersés et survivants, une période d'humectation de 50 °C·h sur tissu sain, et
+  le programme phytosanitaire peut l'empêcher. La première infection secondaire du modèle (03/06) est un **danger
+  conditionnel** (conditions réunies si les sporanges de la nuit du 02/06 existent), qui repose sur une seule nuit
+  marginale (HR entre 90 et 92 %) et que les observations disponibles ne permettent ni de confirmer ni d'infirmer.
 * Profil `calage_2026` : seuil d'humidité ramené de 92 à 90 % (durée 4 h inchangée). Les résultats de sensibilité ci-dessus
   (secondaire) ont été obtenus AVANT cet ajustement, avec 92 % ; à refaire.
 
@@ -393,8 +424,9 @@ Chaque ligne est jugée contre l'observation de terrain 2026 (taches d'huile vue
 **rappel seulement** : « compatible » = au moins une tache prédite dans la période (± 3 j) ; « écart (j) » =
 distance entre le début observé et la tache prédite la plus proche (< 0 : prédite trop tôt).
 
-**Ce que l'observation ne prouve pas.** L'absence de taches après le 06/06 (et l'absence de fructification)
-peut venir de la protection phytosanitaire : une infection prédite sans taches n'est pas une fausse alerte.
+**Ce que l'observation ne prouve pas.** L'absence de taches après le 06/06 peut venir de la protection phytosanitaire :
+une infection prédite sans taches n'est pas une fausse alerte. (La fructification, elle, a été vue faible mais non
+nulle : elle teste l'étape de sporulation, pas les contaminations.)
 « avant », « après » et « spor. » sont donc affichés à titre d'information, sans jouer dans le verdict.
 La précision du modèle ne se juge pas sur la maladie observée sous protection (voir « Périmètre »).
 
