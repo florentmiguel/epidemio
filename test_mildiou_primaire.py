@@ -367,6 +367,13 @@ class TestIncubationSporulation(unittest.TestCase):
         regles.update(plage(32 + 337, 32 + 337 + 48, hr=hr_nuit, temp=temp_nuit))
         return lancer(serie(DEBUT, 800, regles=regles), FORCE_AVRIL)["cycles"][0]
 
+    def test_la_sortie_liste_toutes_les_nuits_de_sporulation(self):
+        c = self.chaine()                                       # 48 h d'humidité continue : deux nuits entières
+        self.assertEqual(len(c["sporulations"]), 2)
+        self.assertEqual(c["sporulations"][0], c["sporulation"]["t"])         # la première est l'événement « sporulation »
+        self.assertLess(c["sporulations"][0], c["sporulations"][1])
+        self.assertNotIn("sporulations", self.chaine(hr_nuit=88.0))           # pas de nuit favorable : pas de liste
+
     def test_incubation_14_jours_a_12_degres(self):
         c = self.chaine()
         self.assertEqual(t(c["infection"]), DEBUT + 32 * H)

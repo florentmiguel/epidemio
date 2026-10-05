@@ -694,6 +694,7 @@ def calculer_saison(rows, lat, lon, params=None, now=None, bbch=None) -> dict:
             c["statut"] = "sporulation"
             c["repiquage"] = True          # passage aux infections secondaires (étage suivant)
             c["_nuits_spor"] = evo["nuits"]
+            c["sporulations"] = [_iso(rows[i]["t"]) for i in evo["nuits"]]      # toutes les nuits de sporulation de la tache
         elif evo["fenetre_ecoulee"]:
             c["statut"] = "taches_sans_sporulation"
 

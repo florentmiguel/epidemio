@@ -13,11 +13,12 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `exporter_plasmopy.py` | convertit meteo.csv au format d'entrée de Plasmopy (témoin de comparaison) |
 | `diagnostic_infection.py` | retrouve quelles heures somment une force d'infection donnée (ex. celle de Plasmopy) |
 | `croiser_maturation.py` | date de maturité du moteur (DJ8) comparée à celle du modèle de Rossi (temps hydro-thermique) |
+| `sensibilite_sporulation.py` | carte du critère de sporulation : nuits de sporulation dans une fenêtre selon le seuil d'humidité et la durée |
 | `sensibilite_secondaire.py` | rejoue la saison en ne changeant qu'un paramètre secondaire à la fois (survie des sporanges, durée de vie des taches, tolérance) |
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 177 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 185 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -154,6 +155,34 @@ Orlandini 2008, Lalancette 1987-88, Kennelly 2007 et Vinemild.
   contaminations simulées. Chez nous le défaut inverse est possible (pointes de pluie lissées) ; dans les deux cas la qualité
   de la météo domine. Leur validation de dates et d'incubation n'est bonne que lorsque la météo est concordante.
 * L'intensité de la maladie en fin de saison dépend avant tout des contaminations **secondaires** (leur conclusion).
+
+## Résultats sur la saison 2026 (Reims, météo Open-Meteo, profil `calage_2026`)
+
+**Maturation croisée** (`croiser_maturation.py`) : moteur (DJ8 >= 140) **23 avril** ; Rossi (temps hydro-thermique) 3 % le
+11 février, **50 % le 27 avril**, 97 % le 18 juillet. Les deux méthodes indépendantes concordent à 4 jours près sur le point
+médian : notre « maturité acquise le 23 avril » correspond à environ la moitié du stock d'oospores de Rossi, pas à 100 %.
+
+**Sensibilité des infections secondaires** (`sensibilite_secondaire.py`, un paramètre à la fois) :
+
+| Paramètre | Valeurs testées | 1re infection | Événements | Verdict |
+|---|---|---|---|---|
+| Survie des sporanges | VPD, Franche 0,01, Vinemild, fixe 2 à 15 jours | **28/08 partout** | 8 à 23 (défaut 14) | change la fréquence en sept.-oct., pas la date |
+| Détachement par la pluie | aucune, >= 0,2 mm/h, >= 1 mm/h | 28/08 partout | 14, 12, 9 | effet faible sur cette saison |
+| Productivité des taches | toutes les nuits, RS >= 0,25 / 0,1 / 0,05 | 28/08 partout | 14 partout | sans effet sur cette saison |
+| Tolérance d'interruption | 0 à 3 h | 28/08 partout | 14 à 15 | sans effet |
+| Durée de vie des taches | 7, 10, 15, 20, 30 jours, illimitée | 28/08 (20/08 si illimitée) | 8, 12, 14, 14, 14, 21 | 15 jours suffisent ; l'illimité ajoute 7 infections en août |
+| **Conditions de sporulation** | texte/Plasmopy ; Franche (6 h, HR > 90 %) ; Rossi (3 h, HR >= 80 %, T >= 10 °C) | **28/08 ; 03/06 ; 22/05** | 14 ; 11 ; 38 | **le paramètre décisif** |
+
+La date de la première infection secondaire ne dépend que du critère de sporulation. Avec celui du texte de travail et de
+Plasmopy, aucune nuit de sporulation n'a lieu pendant la vie des taches de mai-juin, ce qui concorde avec l'absence de
+fructification observée au champ (sous protection : preuve partielle).
+
+**Observation de terrain** (clients de Florent, même programme phytosanitaire, 2026) : sortie de taches d'huile en mai-juin
+**sans fructification marquée, mais pas nulle**. Elle écarte les deux extrêmes : le critère du texte de travail prédit zéro
+sporulation (trop strict), celui de Rossi en prédit beaucoup (38 infections secondaires dont 13 en juin : trop permissif).
+Réserve : le programme phytosanitaire peut lui-même limiter la fructification visible, et le duvet blanc ne se voit qu'au
+petit matin. `sensibilite_sporulation.py` cartographie l'espace entre les critères : la sortie du moteur liste désormais
+toutes les nuits de sporulation de chaque tache (`sporulations`).
 
 **Références** (accès libre) : Brischetto, Bove, Fedele, Rossi (2021), *Front. Plant Sci.* 12:636607 ; Brischetto, Bove,
 Languasco, Rossi (2020), *Front. Plant Sci.* 11:1187 ; Kennelly et al. (2007), *Phytopathology* 97:512 ; Caffi et al. (2013),
