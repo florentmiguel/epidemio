@@ -1,20 +1,21 @@
-# Moteur mildiou — contamination primaire (v0)
+# Moteur mildiou — contaminations primaire et secondaire (v0)
 
 Module pur : une série météo **horaire (UTC)** en entrée, le cycle biologique de la
-saison en sortie (maturation → germination → dispersion → infection → incubation →
-taches → sporulation). Tout est recalculé depuis le 1er janvier à chaque appel.
+saison en sortie (primaire : maturation → germination → dispersion → infection → incubation →
+taches → sporulation ; secondaire : sporanges → infection des feuilles saines → incubation → taches →
+sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 
 ## Fichiers
 | Fichier | Rôle |
 |---|---|
-| `mildiou_primaire.py` | le moteur + ses paramètres (`PARAMS`) + une ligne de commande |
+| `mildiou_primaire.py` | le moteur (primaire **et secondaire**) + ses paramètres (`PARAMS`) + une ligne de commande (le nom du fichier sera changé quand le dépôt accueillera l'oïdium et le botrytis) |
 | `recuperer_meteo_horaire.py` | télécharge la météo horaire d'une position (Open-Meteo) → CSV (validé sur le VPS) |
 | `exporter_plasmopy.py` | convertit meteo.csv au format d'entrée de Plasmopy (témoin de comparaison) |
 | `diagnostic_infection.py` | retrouve quelles heures somment une force d'infection donnée (ex. celle de Plasmopy) |
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 124 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 146 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -30,6 +31,58 @@ Le moteur évalue le **risque épidémiologique indépendamment de tout programm
 Une infection prédite n'est donc ni une alerte ni une absence d'alerte : c'est l'OAD qui la rapproche de l'état de
 protection. La **pluie cumulée depuis une date** est un fait météo neutre que le moteur peut fournir ; le seuil de
 lessivage, propre à chaque produit, reste à l'OAD. Aucune donnée de traitement n'entre dans le moteur.
+
+## Infections secondaires (v0)
+Après la première sporulation d'une tache, le moteur enchaîne les générations suivantes :
+* **Sources** : chaque *nuit* de sporulation d'une tache (HR ≥ 92 %, T ≥ 12 °C, ≥ 4 h d'obscurité, pendant les 15 jours
+  de vie de la tache) produit des sporanges, disponibles tant qu'ils survivent (voir plus bas). Toutes les nuits comptent.
+* **Infection** : tant qu'un sporange est disponible, chaque période d'humectation (feuille mouillée, 3 ≤ T ≤ 29 °C)
+  cumule des degrés-heures **T × h** ; à **50 °C·h** et ≥ 1 h de mouillage, une infection secondaire est acquise
+  (une par période d'humectation). Une feuille qui sèche plus d'1 h (`tolerance_h`) perd la période.
+* **Suite** : incubation (table de Goidanich, comme le primaire) → taches → nuits de sporulation → nouvelles sources.
+  Chaque événement porte sa **génération** (1 = issu de taches primaires ; 2 = issu de taches secondaires…, génération
+  minimale parmi les sources disponibles) et sa **source** (`P3` = taches du cycle primaire n°3, `S5` = taches de
+  l'infection secondaire n°5).
+* **Sortie** : `res["secondaires"]` (événements) et, par jour, `force_secondaire_dh` (degrés-heures cumulés sur les heures
+  mouillées où des sporanges étaient disponibles : le danger potentiel du jour, qu'une période atteigne 50 °C·h ou non).
+  Désactivable : `secondaire.actif = False` ou `--sans-secondaire`.
+
+| Paramètre | Valeur | Origine |
+|---|---|---|
+| Plage de température | 3 à 29 °C | [P] Plasmopy ; Rossi et al. 2021 : 4,0 / 21,0 / 30,2 °C (min. / optimum / max.) |
+| Formule | produit T × h (base 0) | [F] texte suisse : « température × durée d'humectation = 50 » |
+| Seuil | 50 °C·h | [F][P] ; Rossi et al. 2021 : 2 h à l'optimum de 21 °C (≈ 2,4 h pour 50 °C·h) |
+| Mouillage minimal | 1 h | [P] ≥ 60 min |
+| Tolérance d'interruption | 1 h | [R] Rossi et al. 2021 : humectation continue ou interrompue au plus 1 h |
+| Survie des sporanges | selon le déficit de saturation (VPD) : 2 à 9 jours | [R] Blaeser & Weltzien 1979, équations publiées dans Brischetto et al. 2020 |
+| Durée de vie d'une tache | 15 jours | [F] Orlandini et al. 2008, citée dans le texte de travail |
+| Condition de pluie pour la dispersion | aucune | [R] sporanges présents dans l'air hors pluie (Caffi et al. 2013 ; Rossi et al. 2021) ; Plasmopy : idem |
+
+**Survie des sporanges** (`secondaire.survie = "vpd"`, défaut). Chaque nuit de sporulation lance une cohorte de sporanges.
+Chaque heure, une fraction `1 / (24 × S)` de la cohorte meurt, où `S` est la survie en jours, trinôme du déficit de
+saturation VPD (hPa) : sporanges attachés `S = 9,27 − 1,12·VPD + 0,04·VPD²`, détachés `S = 5,67 − 0,47·VPD + 0,02·VPD²`
+(moyenne des deux, comme Brischetto 2020). La cohorte est disponible jusqu'à ce que la mortalité cumulée atteigne 1 : environ
+7 jours en air saturé, 2 jours en air très sec. Deux choix de lecture, vérifiés contre l'article : le trinôme est une **durée de
+survie** (c'est la seule lecture qui redonne ses « 2 à 9 jours », « 3 à 5 jours » et ses mortalités de 0,19 à 0,33 par jour),
+et le VPD est le déficit **physique** (Buck 1981), celui de son tableau 1. Au-delà du VPD qui minimise le trinôme (14 et
+11,75 hPa) la survie est maintenue constante : la parabole remonte ensuite, ce qui n'a pas de sens physique.
+Mode `"fixe"` (`--vie-sporanges H`) : durée constante, pour les comparaisons.
+
+**Limites connues de la v0**
+* **La densité de sporanges n'est pas modélisée** : un sporange est disponible ou non. Or la productivité d'une tache chute
+  vite avec les sporulations répétées (Kennelly et al. 2007) et se concentre sur les premiers jours (Caffi et al. 2013) ;
+  Plasmopy module la production par la température (11 à 17,5 °C) avec une latence de 4 h. Conséquence : le moteur
+  surestime l'intensité des dernières nuits d'une tache.
+* **Sporulation** : nous gardons les règles du texte de travail (HR ≥ 92 %, T ≥ 12 °C, ≥ 4 h d'obscurité). La littérature est
+  plus permissive (Rossi et al. 2021 : ≥ 3 h humides, 10 à 30 °C, HR ≥ 80 %) ; sensibilité à tester.
+* Une infection par période d'humectation, quel que soit le nombre de taches sources.
+* Non validé contre Plasmopy à ce jour : `python3 lire_plasmopy.py <events_table.csv> --secondaire` affiche ses sporanges, la
+  durée de vie de ses spores et ses infections secondaires.
+
+**Références** (accès libre) : Brischetto, Bove, Fedele, Rossi (2021), *Front. Plant Sci.* 12:636607 ; Brischetto, Bove,
+Languasco, Rossi (2020), *Front. Plant Sci.* 11:1187 ; Kennelly et al. (2007), *Phytopathology* 97:512 ; Caffi et al. (2013),
+*Phytopathology* 103:64 ; Orlandini, Massetti, Dalla Marta (2008), *Comput. Electron. Agric.* 64:149 ;
+Blaeser & Weltzien (1979), *J. Plant Dis. Prot.* 86:489.
 
 ## Tester contre Plasmopy (témoin)
 Plasmopy (Agroscope, licence AGPL-3.0) sert de **témoin** : on lui donne la même météo et on compare ses
@@ -107,7 +160,7 @@ Une option de la ligne de commande surcharge le profil.
 | Humectation | HR ≥ 90 % (proxy, sans capteur) | hypothèse, rappel observé robuste |
 | Incubation | table de Goidanich | fin d'incubation à ≤ 13 h de Plasmopy |
 | Sporulation | HR ≥ 92 %, T ≥ 12 °C, 4 h de nuit continues | règle du texte |
-| Durée de vie d'une tache | 10 jours | **hypothèse** à confirmer (la référence n'en a pas) |
+| Durée de vie d'une tache | 15 jours | Orlandini et al. 2008 (la référence Plasmopy n'en a pas) |
 
 ## Utilisation
 ```bash
@@ -125,7 +178,7 @@ Pour voir le détail des cycles avec un critère choisi (dates, pluie retenue à
 python3 mildiou_primaire.py meteo.csv --lat 49.25 --lon 3.96 --fenetre 6 --seuil 5
 ```
 Options : `--fenetre` / `--seuil` (dispersion), `--tolerance` / `--minimum` / `--hr` (humectation),
-`--fenetre-spor` (durée de vie d'une tache, en jours), `--cumul` (maturation), `--dh` (formule d'infection),
+`--fenetre-spor` (durée de vie d'une tache, en jours ; défaut 15), `--cumul` (maturation), `--dh` (formule d'infection),
 `--tmax` (plafond de température d'une heure infectante), `--validite-inf` (fenêtre d'infection, en heures), `--maturite`.
 En Python : `calculer_saison(rows, lat, lon, params={...}, now=..., bbch={...})`.
 `params` fusionne avec `PARAMS` : pour tester une variante, on ne surcharge que ce qui change.
@@ -238,11 +291,10 @@ Chaque écart se règle par un paramètre, sans toucher au code :
 | loi d'incubation | table de ton modèle | « température moyenne » (loi inconnue) | à lever par essais |
 
 ## Limites connues de la v0
-* Pas de repiquage (phase suivante) : le cycle s'arrête à la sporulation (`repiquage: true`).
-* Durée de vie des taches (`sporulation.fenetre_j`, défaut : illimitée). Constat sur données réelles 2026 :
-  sans fenêtre, six cycles de mai-juin sporulent tous le 19/08, première nuit favorable, 3 mois plus tard
-  (artefact). Avec une fenêtre, une tache sans nuit favorable passe en `taches_sans_sporulation`.
-  Valeur à fixer (test : 10 jours).
+* Infections secondaires : première version (voir la section dédiée) ; non validée contre Plasmopy.
+* Durée de vie des taches (`sporulation.fenetre_j`, défaut **15 jours**, Orlandini et al. 2008). Constat sur données réelles
+  2026 avec une fenêtre illimitée (`None`) : six cycles de mai-juin sporulent tous le 19/08, première nuit favorable,
+  3 mois plus tard (artefact). Avec une fenêtre, une tache sans nuit favorable passe en `taches_sans_sporulation`.
 * Pas de stade BBCH par client pour l'instant : sans `bbch`, le coefficient vaut 1.
 * Pluie horaire de réanalyse : les pointes sont lissées, le seuil de 3 mm/h peut être sous-détecté.
 * Paramètres non calés sur des observations : le rétro-test sur les saisons passées reste à faire.

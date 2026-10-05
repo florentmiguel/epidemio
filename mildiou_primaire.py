@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VITI Sens — Moteur mildiou, contamination primaire (v0)
-=======================================================
+VITI Sens — Moteur mildiou : contaminations primaire et secondaire (v0)
+=======================================================================
 
 Module pur : il reçoit une série météo HORAIRE (UTC) et rend le cycle
 biologique de la saison, étape par étape :
 
-  maturation des oospores -> germination -> dispersion -> infection
-  -> incubation -> taches d'huile -> sporulation -> (passage au repiquage)
+  PRIMAIRE   maturation des oospores -> germination -> dispersion -> infection
+             -> incubation -> taches d'huile -> sporulation
+  SECONDAIRE sporanges des taches -> infection des feuilles saines (T x h >= 50,
+             feuille mouillée) -> incubation -> taches -> sporulation -> ...
+             (un cycle par période d'humectation tant que des sporanges sont disponibles)
 
 Principes
 ---------
@@ -113,9 +116,31 @@ PARAMS = {
         "temperature_min": 12.0,               #     T >= 12 °C
         "nuit_continue_h": 4,                  #     >= 4 h consécutives d'obscurité
         "elevation_nuit_deg": -0.833,          # [D] soleil sous l'horizon = nuit
-        "fenetre_j": None,                     # [D] durée de vie d'une tache pour sporuler, en jours après son apparition.
-                                               #     None = illimitée (v0) : artefact constaté sur données réelles
-                                               #     (des taches de mai sporulent « à la première nuit favorable », 3 mois plus tard)
+        "fenetre_j": 15,                       # [F] durée de vie d'une tache d'huile : 15 jours au plus, en jours après son
+                                               #     apparition (Orlandini et al. 2008, citée dans le texte de travail).
+                                               #     None = illimitée : artefact (des taches de mai sporulent 3 mois plus tard)
+    },
+
+    "secondaire": {                            # infections secondaires (repiquage) : sporanges des taches -> feuilles saines
+        "actif": True,
+        "temperature_min": 3.0,                # [P] plage 3-29 °C de l'infection secondaire (Plasmopy) ; Rossi et al. 2021 :
+        "temperature_max": 29.0,               #     4,0 / 21,0 / 30,2 °C (minimum / optimum / maximum)
+        "base_degres_heures": 0.0,             # [F] « température x durée d'humectation = 50 » : produit T x h (base 0)
+        "seuil_dh": 50.0,                      # [F][P] 50 °C.h (à 10 °C : 5 h) ; Rossi et al. 2021 : 2 h à l'optimum de 21 °C
+        "mouillage_min_h": 1,                  # [P] mouillage >= 60 min
+        "tolerance_h": 1,                      # [R] Rossi et al. 2021 : période d'infection = humectation continue ou
+                                               #     interrompue au plus 1 h
+        "survie": "vpd",                       # "vpd" : les sporanges meurent à un rythme fonction du déficit de saturation
+                                               #     (équations de Blaeser & Weltzien 1979, d'après Brischetto et al. 2020) ;
+                                               #     "fixe" : durée_vie_sporanges_h
+        "duree_vie_sporanges_h": 72,           # [D] mode « fixe » seulement
+        "survie_vpd": {
+            "attaches": [9.27, -1.12, 0.04],   # [R] survie (jours) d'un sporange encore sur sporangiophore : a + b.VPD + c.VPD²
+            "detaches": [5.67, -0.47, 0.02],   # [R] idem, sporange détaché
+            "poids_attaches": 0.5,             # [R] Brischetto 2020 : même probabilité de mourir avant ou après détachement
+            # Au-delà du VPD qui minimise le trinôme (14 et 11,75 hPa), la survie reste constante : le trinôme remonte
+            # ensuite (non physique), nous le plafonnons.
+        },
     },
 
     "sensibilite": {                           # [F] BBCH comme coefficient, pas comme condition binaire
@@ -137,8 +162,9 @@ PROFILS = {
         "infection": {"soustraire_base": False, "temperature_min": 8.0, "temperature_max": 99.0, "seuil_dh": 50.0,
                       "mouillage_min_h": None, "validite_h": 24},
         "humectation": {"hr_pct": 90.0, "tolerance_h": None},
-        # Durée de vie d'une tache : HYPOTHÈSE (la référence n'en a pas : ses taches de juin sporulent le 19/08).
-        "sporulation": {"fenetre_j": 10},
+        # Durée de vie d'une tache : 15 jours (Orlandini et al. 2008 ; la référence n'en a pas : ses taches de juin
+        # sporulent le 19/08).
+        "sporulation": {"fenetre_j": 15},
     },
 }
 
@@ -282,6 +308,144 @@ def _iso(v):
     if isinstance(v, datetime):
         return v.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
     return v
+
+
+def vpd_hpa(temp, hr) -> float:
+    """Déficit de saturation de l'air, en hPa (pression de vapeur saturante de Buck 1981). HR absente : air saturé."""
+    if hr is None:
+        return 0.0
+    es = 6.1121 * math.exp((18.678 - temp / 234.5) * temp / (257.14 + temp))
+    return max(0.0, es * (1.0 - hr / 100.0))
+
+
+def survie_jours(coefs, vpd: float) -> float:
+    """Survie (jours) d'un sporange : trinôme en VPD, maintenu constant au-delà de son minimum (sommet de la parabole)."""
+    a, b, cc = coefs
+    v = min(vpd, -b / (2.0 * cc)) if cc > 0 else vpd
+    return a + b * v + cc * v * v
+
+
+def mortalite_horaire(temp, hr, psv: dict) -> float:
+    """Fraction de sporanges qui meurent pendant une heure : 1 / (24 x survie en jours), moyenne pondérée des sporanges
+    attachés et détachés (Blaeser & Weltzien 1979, d'après Brischetto et al. 2020)."""
+    v = vpd_hpa(temp, hr)
+    w = psv["poids_attaches"]
+    return (w / survie_jours(psv["attaches"], v) + (1.0 - w) / survie_jours(psv["detaches"], v)) / 24.0
+
+
+def fin_disponibilite(mor, i0: int) -> int:
+    """Premier indice où les sporanges apparus en i0 ne sont plus disponibles : le cumul des mortalités horaires
+    (mor) atteint 1. Rend len(mor) si la série s'arrête avant."""
+    cumul, i = 0.0, i0
+    while i < len(mor) and cumul < 1.0:
+        cumul += mor[i]
+        i += 1
+    return i
+
+
+def evolution_lesions(rows, idx, i_infection, tmoy_jour, tz, pinc, ps, nuits) -> dict:
+    """Suite d'une infection survenue à l'heure d'indice i_infection : incubation, apparition des taches,
+    puis TOUTES les nuits de sporulation (une par nuit où HR, T et obscurité sont réunies >= nuit_continue_h)
+    jusqu'à la fin de vie de la tache (sporulation.fenetre_j, illimitée si None).
+    Commun aux infections primaires et secondaires.
+    Retourne {progression_pct, t_sym, nuits (indices de ligne), fenetre_ecoulee}."""
+    prog, t_sym = 0.0, None
+    for i in range(i_infection + 1, len(rows)):
+        dur = duree_incubation(tmoy_jour[rows[i]["t"].astimezone(tz).date()], pinc)
+        if dur:
+            prog += 1.0 / (24.0 * dur)
+        if prog >= 1.0 - 1e-9:
+            t_sym = rows[i]["t"] + H
+            break
+    out = {"progression_pct": min(100, int(prog * 100)), "t_sym": t_sym, "nuits": [], "fenetre_ecoulee": False}
+    if t_sym is None:
+        return out
+    fin_spor = t_sym + timedelta(days=ps["fenetre_j"]) if ps.get("fenetre_j") else None
+    run = 0
+    for i in range(idx.get(t_sym, len(rows)), len(rows)):
+        r = rows[i]
+        if fin_spor is not None and r["t"] >= fin_spor:
+            break
+        ok = (nuits[i] and r["hr"] is not None and r["hr"] >= ps["hr_min"]
+              and r["temp"] >= ps["temperature_min"])
+        run = run + 1 if ok else 0
+        if run == ps["nuit_continue_h"]:
+            out["nuits"].append(i)
+    # fenêtre écoulée dans la série sans nuit favorable : la tache ne sporulera plus
+    out["fenetre_ecoulee"] = (not out["nuits"] and fin_spor is not None and rows[-1]["t"] + H >= fin_spor)
+    return out
+
+
+def calculer_secondaires(rows, idx, p, tz, tmoy_jour, nuits, cycles):
+    """Infections secondaires, heure par heure.
+
+    Sources : chaque nuit de sporulation d'une tache (primaire, puis secondaire) produit des sporanges disponibles
+    pendant duree_vie_sporanges_h. Tant qu'un sporange est disponible, chaque période d'humectation (feuille mouillée,
+    T dans la plage) cumule des degrés-heures ; à seuil_dh, une infection secondaire est acquise (une par période).
+    Elle suit le même chemin que le primaire : incubation, taches, nuits de sporulation -> nouvelles sources.
+
+    Les nouvelles sources sont toujours situées après l'infection qui les produit (incubation >= 4 jours) : le calcul
+    en un seul passage chronologique est donc exact. Retourne (événements, force par jour local)."""
+    ps2, pinc, ps = p["secondaire"], p["incubation"], p["sporulation"]
+    n, duree = len(rows), int(ps2["duree_vie_sporanges_h"])
+    couv_gen, couv_src = [None] * n, [None] * n        # génération minimale et source qui couvrent chaque heure
+    mor = ([mortalite_horaire(r["temp"], r["hr"], ps2["survie_vpd"]) for r in rows]
+           if ps2["survie"] == "vpd" else None)
+
+    def ajouter_source(i0, gen, src):
+        """Une nuit de sporulation en i0 : les sporanges sont disponibles jusqu'à leur mort (cumul de mortalité >= 1)
+        ou, en mode « fixe », pendant duree_vie_sporanges_h."""
+        fin = min(n, i0 + duree) if mor is None else fin_disponibilite(mor, i0)
+        for i in range(i0, fin):
+            if couv_gen[i] is None or gen < couv_gen[i]:
+                couv_gen[i], couv_src[i] = gen, src
+
+    for c in cycles:
+        for i0 in c.get("_nuits_spor", []):
+            ajouter_source(i0, 0, {"type": "primaire", "id": c["id"]})
+
+    evenements, force_jour = [], {}
+    vide = {"dh": 0.0, "n": 0, "gap": 0, "ev": None}
+    per = dict(vide)
+    for i, r in enumerate(rows):
+        T = r["temp"]
+        if not (est_mouille(r, p) and ps2["temperature_min"] <= T <= ps2["temperature_max"]):
+            per["gap"] += 1
+            if per["gap"] > ps2["tolerance_h"]:
+                per = dict(vide)                         # la feuille a séché : la période est perdue
+            continue
+        per["gap"] = 0
+        if couv_gen[i] is None:                          # feuille mouillée mais aucun sporange disponible
+            continue
+        dh = max(0.0, T - ps2["base_degres_heures"])
+        per["dh"] += dh
+        per["n"] += 1
+        j = r["t"].astimezone(tz).date()
+        force_jour[j] = force_jour.get(j, 0.0) + dh
+        if per["ev"] is not None:                        # période déjà infectante : la force continue de croître
+            per["ev"]["_dh"] += dh
+            continue
+        if per["dh"] >= ps2["seuil_dh"] - 1e-9 and per["n"] >= ps2["mouillage_min_h"]:
+            ev = {"id": len(evenements) + 1, "generation": couv_gen[i] + 1, "source": couv_src[i],
+                  "infection": {"t": r["t"]}, "statut": "infection", "_dh": per["dh"]}
+            evo = evolution_lesions(rows, idx, i, tmoy_jour, tz, pinc, ps, nuits)
+            ev["incubation"] = {"progression_pct": evo["progression_pct"], "debut": r["t"] + H}
+            if evo["t_sym"] is not None:
+                ev["taches"] = {"t": evo["t_sym"]}
+                ev["statut"] = "taches_visibles"
+                if evo["nuits"]:
+                    ev["sporulation"] = {"t": rows[evo["nuits"][0]]["t"]}
+                    ev["nuits_sporulation"] = len(evo["nuits"])
+                    ev["statut"] = "sporulation"
+                    for i0 in evo["nuits"]:
+                        ajouter_source(i0, ev["generation"], {"type": "secondaire", "id": ev["id"]})
+                elif evo["fenetre_ecoulee"]:
+                    ev["statut"] = "taches_sans_sporulation"
+            evenements.append(ev)
+            per["ev"] = ev
+    for ev in evenements:
+        ev["force_dh"] = round(ev["_dh"], 1)
+    return evenements, force_jour
 
 
 # ---------------------------------------------------------------------------
@@ -449,39 +613,24 @@ def calculer_saison(rows, lat, lon, params=None, now=None, bbch=None) -> dict:
     for c in cycles:
         if "infection" not in c:
             continue
-        i0 = idx[c["infection"]["t"]] + 1
-        prog, t_sym = 0.0, None
-        for i in range(i0, len(rows)):
-            dur = duree_incubation(tmoy_jour[rows[i]["t"].astimezone(tz).date()], pinc)
-            if dur:
-                prog += 1.0 / (24.0 * dur)
-            if prog >= 1.0 - 1e-9:
-                t_sym = rows[i]["t"] + H
-                break
-        c["incubation"] = {"progression_pct": min(100, int(prog * 100)),
-                           "debut": c["infection"]["t"] + H}
-        if t_sym is None:
+        evo = evolution_lesions(rows, idx, idx[c["infection"]["t"]], tmoy_jour, tz, pinc, ps, nuits)
+        c["incubation"] = {"progression_pct": evo["progression_pct"], "debut": c["infection"]["t"] + H}
+        if evo["t_sym"] is None:
             continue
-        c["taches"] = {"t": t_sym}
+        c["taches"] = {"t": evo["t_sym"]}
         c["statut"] = "taches_visibles"
-        fin_spor = t_sym + timedelta(days=ps["fenetre_j"]) if ps.get("fenetre_j") else None
-        run, sporule = 0, False
-        for i in range(idx.get(t_sym, len(rows)), len(rows)):
-            r = rows[i]
-            if fin_spor is not None and r["t"] >= fin_spor:
-                break
-            ok = (nuits[i] and r["hr"] is not None and r["hr"] >= ps["hr_min"]
-                  and r["temp"] >= ps["temperature_min"])
-            run = run + 1 if ok else 0
-            if run >= ps["nuit_continue_h"]:
-                c["sporulation"] = {"t": r["t"]}
-                c["statut"] = "sporulation"
-                c["repiquage"] = True      # passage au moteur « repiquage » (phase suivante)
-                sporule = True
-                break
-        # fenêtre écoulée dans la série sans nuit favorable : la tache ne sporulera plus
-        if not sporule and fin_spor is not None and rows[-1]["t"] + H >= fin_spor:
+        if evo["nuits"]:
+            c["sporulation"] = {"t": rows[evo["nuits"][0]]["t"]}
+            c["statut"] = "sporulation"
+            c["repiquage"] = True          # passage aux infections secondaires (étage suivant)
+            c["_nuits_spor"] = evo["nuits"]
+        elif evo["fenetre_ecoulee"]:
             c["statut"] = "taches_sans_sporulation"
+
+    # --- étage secondaire (repiquage) -----------------------------------
+    secondaires, force_sec_jour = [], {}
+    if p["secondaire"]["actif"]:
+        secondaires, force_sec_jour = calculer_secondaires(rows, idx, p, tz, tmoy_jour, nuits, cycles)
 
     # --- sorties --------------------------------------------------------
     for c in cycles:
@@ -503,10 +652,16 @@ def calculer_saison(rows, lat, lon, params=None, now=None, bbch=None) -> dict:
         return out
 
     sorties = [public(c) for c in cycles]
+    for ev in secondaires:
+        for nom in ("infection", "taches", "sporulation"):
+            if nom in ev:
+                ev[nom]["previsionnel"] = ev[nom]["t"] > now
+    sorties_sec = [public(ev) for ev in secondaires]
     jours_out = []
     for j in sorted(tmoy_jour):
         d = {"date": j.isoformat(), "tmoy": round(tmoy_jour[j], 1),
-             "force_infection_dh": round(force_jour.get(j, 0.0), 1)}
+             "force_infection_dh": round(force_jour.get(j, 0.0), 1),
+             "force_secondaire_dh": round(force_sec_jour.get(j, 0.0), 1)}
         if j in mat_jours:
             m = mat_jours[j]
             d.update({"dj": round(m["dj"], 2), "dj_cumul": round(m["cumul"], 1),
@@ -532,6 +687,7 @@ def calculer_saison(rows, lat, lon, params=None, now=None, bbch=None) -> dict:
         },
         "jours": jours_out,
         "cycles": sorties,
+        "secondaires": sorties_sec,
         "cycles_actifs": [c for c in sorties if c["statut"] in STATUTS_ACTIFS],
     }
 
@@ -565,6 +721,23 @@ def resume(res: dict) -> str:
         L.append(f"  #{c['id']:>2} [{c['statut']}] " + " → ".join(ev) + force)
     L.append("  (* = prévisionnel)")
     L.append("")
+    if res["parametres"]["secondaire"]["actif"]:
+        sec = res.get("secondaires", [])
+        par_gen = {}
+        for e in sec:
+            par_gen[e["generation"]] = par_gen.get(e["generation"], 0) + 1
+        detail = ", ".join(f"génération {g} : {n}" for g, n in sorted(par_gen.items()))
+        L.append(f"INFECTIONS SECONDAIRES : {len(sec)}" + (f" ({detail})" if sec else ""))
+        for e in sec:
+            ev = []
+            for nom, lib in (("infection", "infect."), ("taches", "taches"), ("sporulation", "spor.")):
+                if nom in e:
+                    ev.append(f"{lib} {e[nom]['t']}" + ("*" if e[nom].get("previsionnel") else ""))
+            src = e["source"]
+            L.append(f"  #{e['id']:>2} g{e['generation']} [{e['statut']}] " + " → ".join(ev)
+                     + f" | force {e['force_dh']} °C.h | source {src['type'][0].upper()}{src['id']}")
+        L.append("  (source P = taches primaires, S = taches secondaires ; * = prévisionnel)")
+        L.append("")
     L.append("OÙ EN EST LE CYCLE AUJOURD'HUI")
     actifs = res["cycles_actifs"]
     if not actifs:
@@ -599,6 +772,12 @@ def main(argv=None):
                          "secondaire chez Plasmopy ; mettre 99 pour supprimer le plafond)")
     ap.add_argument("--validite-inf", type=int,
                     help="infection : durée de la fenêtre d'infection après la dispersion, en heures (défaut 24)")
+    ap.add_argument("--sans-secondaire", action="store_true", help="désactive l'étage des infections secondaires")
+    ap.add_argument("--vie-sporanges", type=int,
+                    help="secondaire : durée FIXE de disponibilité des sporanges après une nuit de sporulation, en heures "
+                         "(désactive la survie selon le déficit de saturation)")
+    ap.add_argument("--tol-sec", type=int,
+                    help="secondaire : heures sèches tolérées au sein d'une période d'humectation (défaut 1)")
     ap.add_argument("--dh", choices=("base", "produit"),
                     help="infection : degrés-heures avec base soustraite (T - 8) [défaut] ou produit T x h")
     a = ap.parse_args(argv)
@@ -622,6 +801,15 @@ def main(argv=None):
         inf["validite_h"] = a.validite_inf
     if inf:
         surcharge["infection"] = inf
+    sec = {}
+    if a.sans_secondaire:
+        sec["actif"] = False
+    if a.vie_sporanges is not None:
+        sec["survie"], sec["duree_vie_sporanges_h"] = "fixe", a.vie_sporanges
+    if a.tol_sec is not None:
+        sec["tolerance_h"] = a.tol_sec
+    if sec:
+        surcharge["secondaire"] = sec
     if a.cumul:
         surcharge.setdefault("maturation", {})["mode_cumul"] = a.cumul
     if a.fenetre_spor is not None:

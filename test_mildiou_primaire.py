@@ -402,8 +402,13 @@ class TestIncubationSporulation(unittest.TestCase):
         return serie(DEBUT, longueur, regles=regles)
 
     def test_sans_fenetre_une_tache_sporule_a_la_premiere_nuit_favorable_meme_tres_tard(self):
-        c = lancer(self.serie_nuit_tardive(480), FORCE_AVRIL)["cycles"][0]      # 20 jours plus tard
-        self.assertEqual(c["statut"], "sporulation")
+        res = lancer(self.serie_nuit_tardive(480), fusion(FORCE_AVRIL, {"sporulation": {"fenetre_j": None}}))
+        self.assertEqual(res["cycles"][0]["statut"], "sporulation")           # 20 jours plus tard, sans fenêtre
+
+    def test_defaut_quinze_jours_de_vie_pour_une_tache(self):
+        self.assertEqual(mp.PARAMS["sporulation"]["fenetre_j"], 15)
+        c = lancer(self.serie_nuit_tardive(480), FORCE_AVRIL)["cycles"][0]      # nuit favorable 20 jours plus tard
+        self.assertEqual(c["statut"], "taches_sans_sporulation")
 
     def test_fenetre_de_sporulation_coupe_les_sporulations_tardives(self):
         res = lancer(self.serie_nuit_tardive(480), fusion(FORCE_AVRIL, {"sporulation": {"fenetre_j": 10}}))
@@ -429,12 +434,13 @@ class TestIncubationSporulation(unittest.TestCase):
 
     def test_pas_de_sporulation_si_hr_trop_basse(self):
         c = self.chaine(hr_nuit=88.0)
-        self.assertEqual(c["statut"], "taches_visibles")
+        self.assertEqual(c["statut"], "taches_sans_sporulation")   # fenêtre de 15 jours écoulée dans la série (800 h)
         self.assertNotIn("sporulation", c)
 
     def test_pas_de_sporulation_si_trop_froid(self):
         c = self.chaine(temp_nuit=11.0)
-        self.assertEqual(c["statut"], "taches_visibles")
+        self.assertEqual(c["statut"], "taches_sans_sporulation")
+        self.assertNotIn("sporulation", c)
 
     def test_table_d_incubation(self):
         pi = mp.PARAMS["incubation"]
@@ -594,6 +600,185 @@ class TestGrilleInfection(unittest.TestCase):
         import sensibilite_dispersion as sd
         rows = serie(DEBUT, 200)
         self.assertEqual(len(sd.grille_infection(rows, LAT, LON, (1, 3.0), params=FORCE_AVRIL, now=DEBUT)), 16)
+
+
+class TestSecondaire(unittest.TestCase):
+    """Infections secondaires. Scénario de base : infection primaire à h32 (12 °C), taches à h369, puis UNE seule
+    heure de sporulation (h382 = 27/04 22 h UTC) : la période humide s'arrête à h382, la nuit cumule 12 °C.h < 50 et ne
+    déclenche rien. Chaque test ajoute ensuite une période d'humectation dans la fenêtre des sporanges (h382 à h430)."""
+    I_SPOR = 382
+    VIE_FINIE = {"sporulation": {"fenetre_j": 10}}      # taches primaires actives 10 jours (le défaut est 15)
+
+    def regles_base(self):
+        r = fusion(plage(10, 18, hr=85.0), plage(20, 33, pluie=4.0))
+        r.update(plage(33, 1700, temp=12.0))
+        r.update(plage(369, self.I_SPOR + 1, hr=95.0, temp=12.0))
+        return r
+
+    FIXE_48 = {"secondaire": {"survie": "fixe", "duree_vie_sporanges_h": 48}}     # scénarios déterministes
+
+    def sec(self, extra=None, params=None, now=None):
+        rows = serie(DEBUT, 1700, regles=fusion(self.regles_base(), extra or {}))
+        return lancer(rows, mp.fusionner(mp.fusionner(FORCE_AVRIL, self.FIXE_48), params or {}), now=now)
+
+    def heure(self, i):
+        return (DEBUT + i * H).strftime("%Y-%m-%dT%H:%MZ")
+
+    def test_la_base_seule_ne_donne_aucune_infection_secondaire(self):
+        res = self.sec()
+        self.assertEqual(res["cycles"][0]["sporulation"]["t"], self.heure(self.I_SPOR))
+        self.assertEqual(res["secondaires"], [])
+
+    def test_sans_tache_donc_sans_sporange_aucune_infection(self):
+        rows = serie(DEBUT, 300, regles=plage(0, 300, hr=95.0, temp=20.0))
+        self.assertEqual(lancer(rows, FORCE_AVRIL)["secondaires"], [])
+
+    def test_produit_t_fois_h_a_25_degres_deux_heures_suffisent(self):
+        e = self.sec(plage(400, 402, hr=95.0, temp=25.0))["secondaires"]
+        self.assertEqual(len(e), 1)
+        self.assertEqual(e[0]["infection"]["t"], self.heure(401))          # 25 + 25 = 50 à la 2e heure
+        self.assertEqual((e[0]["generation"], e[0]["source"]), (1, {"type": "primaire", "id": 1}))
+        self.assertAlmostEqual(e[0]["force_dh"], 50.0, places=1)
+
+    def test_plafond_de_29_degres(self):
+        self.assertEqual(self.sec(plage(400, 406, hr=95.0, temp=30.0))["secondaires"], [])
+        e = self.sec(plage(400, 406, hr=95.0, temp=29.0))["secondaires"]
+        self.assertEqual(e[0]["infection"]["t"], self.heure(401))          # 29 compte : 58 à la 2e heure
+
+    def test_plancher_de_3_degres(self):
+        self.assertEqual(self.sec(plage(400, 420, hr=95.0, temp=2.0))["secondaires"], [])
+        e = self.sec(plage(400, 420, hr=95.0, temp=3.0))["secondaires"]
+        self.assertEqual(e[0]["infection"]["t"], self.heure(416))          # 17 heures x 3 = 51 (16 h : 48)
+
+    def test_tolerance_de_l_interruption(self):
+        extra = fusion(plage(400, 402, hr=95.0, temp=20.0), plage(403, 405, hr=95.0, temp=20.0))   # 2 h, 1 h sèche, 2 h
+        strict = self.sec(extra, {"secondaire": {"tolerance_h": 0}})["secondaires"]
+        souple = self.sec(extra, {"secondaire": {"tolerance_h": 1}})["secondaires"]
+        self.assertEqual(strict, [])                                        # deux périodes de 40 °C.h : la feuille a séché
+        self.assertEqual(souple[0]["infection"]["t"], self.heure(403))      # 40 + 20 = 60 à la 3e heure humide
+
+    def test_duree_de_vie_des_sporanges(self):
+        extra = plage(400, 402, hr=95.0, temp=25.0)
+        self.assertEqual(self.sec(extra, {"secondaire": {"duree_vie_sporanges_h": 12}})["secondaires"], [])
+        self.assertEqual(len(self.sec(extra, {"secondaire": {"duree_vie_sporanges_h": 48}})["secondaires"]), 1)
+
+    def test_defauts_secondaire_sources_litterature(self):
+        s = mp.PARAMS["secondaire"]
+        self.assertEqual((s["tolerance_h"], s["survie"]), (1, "vpd"))
+        self.assertEqual(s["survie_vpd"]["attaches"], [9.27, -1.12, 0.04])
+        self.assertEqual(s["survie_vpd"]["detaches"], [5.67, -0.47, 0.02])
+
+    def test_une_periode_humide_ne_donne_qu_une_infection_et_la_force_continue(self):
+        e = self.sec(plage(400, 420, hr=95.0, temp=20.0))["secondaires"]
+        self.assertEqual(len(e), 1)
+        self.assertEqual(e[0]["infection"]["t"], self.heure(402))          # 3 heures x 20 = 60
+        self.assertAlmostEqual(e[0]["force_dh"], 20 * 20.0, places=1)       # 20 heures x 20
+
+    def test_chaine_de_generations(self):
+        # génération 1 : infection h401 ; ses taches apparaissent à h738 ; des nuits humides à ce moment-là
+        # la font sporuler -> infection de génération 2, issue des taches secondaires n°1
+        e1 = self.sec(plage(400, 402, hr=95.0, temp=25.0), self.VIE_FINIE)["secondaires"][0]
+        i_t = int((datetime.strptime(e1["taches"]["t"], "%Y-%m-%dT%H:%MZ").replace(tzinfo=UTC) - DEBUT) / H)
+        extra = fusion(plage(400, 402, hr=95.0, temp=25.0), plage(i_t, i_t + 48, hr=95.0, temp=13.0))
+        evs = self.sec(extra, self.VIE_FINIE)["secondaires"]
+        self.assertEqual([e["generation"] for e in evs], [1, 2])
+        self.assertEqual(evs[1]["source"], {"type": "secondaire", "id": 1})
+        self.assertGreater(evs[1]["infection"]["t"], evs[0]["taches"]["t"])
+
+    def test_taches_primaires_a_vie_illimitee_alimentent_toujours_la_generation_1(self):
+        # fenetre_j illimitée : en mai, les taches d'avril sporulent encore -> source primaire, génération 1
+        ILLIMITE = {"sporulation": {"fenetre_j": None}}
+        e1 = self.sec(plage(400, 402, hr=95.0, temp=25.0), ILLIMITE)["secondaires"][0]
+        i_t = int((datetime.strptime(e1["taches"]["t"], "%Y-%m-%dT%H:%MZ").replace(tzinfo=UTC) - DEBUT) / H)
+        extra = fusion(plage(400, 402, hr=95.0, temp=25.0), plage(i_t, i_t + 48, hr=95.0, temp=13.0))
+        evs = self.sec(extra, ILLIMITE)["secondaires"]
+        self.assertEqual(evs[1]["generation"], 1)
+        self.assertEqual(evs[1]["source"]["type"], "primaire")
+
+    def test_force_quotidienne_secondaire(self):
+        res = self.sec(plage(400, 402, hr=95.0, temp=25.0))
+        j = {d["date"]: d for d in res["jours"]}
+        # 28/04 (heure locale) : la nuit de sporulation (12 °C.h, 27/04 22 h UTC = 00 h locale) + 25 + 25
+        self.assertAlmostEqual(j["2026-04-28"]["force_secondaire_dh"], 62.0, places=1)
+        self.assertAlmostEqual(j["2026-04-29"]["force_secondaire_dh"], 0.0, places=1)
+
+    def test_previsionnel_et_desactivation(self):
+        extra = plage(400, 402, hr=95.0, temp=25.0)
+        self.assertTrue(self.sec(extra, now=DEBUT + 10 * 24 * H)["secondaires"][0]["infection"]["previsionnel"])
+        self.assertFalse(self.sec(extra)["secondaires"][0]["infection"]["previsionnel"])
+        off = self.sec(extra, {"secondaire": {"actif": False}})
+        self.assertEqual(off["secondaires"], [])
+        self.assertTrue(all(d["force_secondaire_dh"] == 0 for d in off["jours"]))
+
+    def test_ligne_de_commande(self):
+        import contextlib, io
+        rows = serie(DEBUT, 1700, regles=fusion(self.regles_base(), plage(400, 402, hr=95.0, temp=25.0)))
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "temperature_2m", "relative_humidity_2m", "precipitation", "dew_point_2m"])
+            for r in rows:
+                w.writerow([r["t"].strftime("%Y-%m-%dT%H:%M"), r["temp"], r["hr"], r["pluie"], ""])
+            chemin = f.name
+        try:
+            def cli(*args):
+                s = io.StringIO()
+                with contextlib.redirect_stdout(s):
+                    mp.main([chemin, "--lat", "49.25", "--lon", "4.03", "--maturite", "2026-04-11", *args])
+                return s.getvalue()
+            avec, sans, court = cli(), cli("--sans-secondaire"), cli("--vie-sporanges", "12")
+        finally:
+            os.unlink(chemin)
+        self.assertIn("INFECTIONS SECONDAIRES : 1 (génération 1 : 1)", avec)
+        self.assertIn("source P1", avec)
+        self.assertNotIn("INFECTIONS SECONDAIRES", sans)
+        self.assertIn("INFECTIONS SECONDAIRES : 0", court)
+
+
+class TestSurvieSporanges(unittest.TestCase):
+    """Survie des sporanges : trinômes de Blaeser & Weltzien (1979) d'après Brischetto et al. (2020)."""
+    PSV = mp.PARAMS["secondaire"]["survie_vpd"]
+
+    def test_vpd_physique(self):
+        self.assertAlmostEqual(mp.vpd_hpa(20.0, 50.0), 11.69, places=1)
+        self.assertAlmostEqual(mp.vpd_hpa(22.4, 57.0), 11.65, places=1)       # Table 1 de l'article : 11,6 hPa
+        self.assertEqual(mp.vpd_hpa(20.0, 100.0), 0.0)
+        self.assertEqual(mp.vpd_hpa(20.0, None), 0.0)                          # HR absente : air saturé
+
+    def test_survie_en_jours_reproduit_les_extremes_publies(self):
+        att, det = self.PSV["attaches"], self.PSV["detaches"]
+        self.assertAlmostEqual(mp.survie_jours(att, 0.0), 9.27, places=2)       # « 2 à 9 jours » (attachés)
+        self.assertAlmostEqual(mp.survie_jours(att, 14.0), 1.43, places=2)      # minimum au sommet (14 hPa)
+        self.assertAlmostEqual(mp.survie_jours(det, 0.0), 5.67, places=2)       # « 3 à 5 jours » (détachés)
+        self.assertAlmostEqual(mp.survie_jours(det, 11.75), 2.91, places=2)
+
+    def test_la_survie_reste_constante_au_dela_du_minimum(self):
+        for coefs in (self.PSV["attaches"], self.PSV["detaches"]):
+            self.assertAlmostEqual(mp.survie_jours(coefs, 40.0), mp.survie_jours(coefs, 25.0), places=9)
+            self.assertLessEqual(mp.survie_jours(coefs, 40.0), mp.survie_jours(coefs, 0.0))   # jamais plus longue en air sec
+
+    def test_duree_de_vie_air_sature_et_air_sec(self):
+        sature = mp.mortalite_horaire(20.0, 100.0, self.PSV)
+        sec = mp.mortalite_horaire(20.0, 30.0, self.PSV)
+        self.assertAlmostEqual(1 / (24 * sature), 1 / (0.5 / 9.27 + 0.5 / 5.67), places=6)    # ≈ 7,0 jours
+        self.assertAlmostEqual(1 / (24 * sec), 1 / (0.5 / 1.43 + 0.5 / 2.91), delta=0.02)     # ≈ 1,9 jour
+        self.assertGreater(sec, 3 * sature)
+
+    def test_fin_de_disponibilite(self):
+        self.assertEqual(mp.fin_disponibilite([0.01] * 500, 10), 110)           # 100 heures de survie
+        self.assertEqual(mp.fin_disponibilite([0.01] * 50, 10), 50)             # la série s'arrête avant la mort
+        self.assertEqual(mp.fin_disponibilite([1.0] * 5, 2), 3)                 # mortalité totale en une heure
+
+    def test_en_air_sec_les_sporanges_meurent_plus_vite_qu_en_air_humide(self):
+        # même scénario, seule l'humidité des heures sèches change : la fenêtre des sporanges se raccourcit
+        def infections(hr_sec):
+            r = fusion(plage(10, 18, hr=85.0), plage(20, 33, pluie=4.0))
+            r.update(plage(33, 1700, temp=12.0, hr=hr_sec))
+            r.update(plage(369, 383, hr=95.0, temp=12.0))                       # une heure de sporulation (h382)
+            r.update(plage(450, 452, hr=95.0, temp=25.0))                       # humectation 68 h plus tard
+            res = lancer(serie(DEBUT, 1700, regles=r), mp.fusionner(FORCE_AVRIL, {"secondaire": {"survie": "vpd"}}))
+            return len(res["secondaires"])
+        self.assertEqual(infections(hr_sec=85.0), 1)       # air humide : sporanges encore viables à h450
+        self.assertEqual(infections(hr_sec=30.0), 0)       # air très sec : morts avant h450 (≈ 60 h de survie à 12 °C)
 
 
 class TestProfil(unittest.TestCase):

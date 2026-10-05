@@ -64,6 +64,25 @@ class TestLirePlasmopy(unittest.TestCase):
             self.assertTrue(lp.vide(v))
         self.assertFalse(lp.vide("2026-05-02"))
 
+    def test_resume_secondaire(self):
+        entete = ENTETE
+        ligne = ("200,2026-06-26 10:00:00+00:00,2026-04-23 00:00:00+00:00,2026-06-26 15:00:00+00:00,"
+                 "2026-06-26 15:00:00+00:00,2026-06-26 16:00:00+00:00,5.0,2026-07-02 16:00:00+00:00,"
+                 "2026-08-19 04:00:00+00:00,\"[1.5, 2.0]\",3.2,\"[Timestamp('2026-08-20 02:00:00+0000'), "
+                 "Timestamp('2026-08-21 03:00:00+0000')]\",172.6,\"[88.0, 120.5]\"")
+        sans = "100,2026-04-23 00:00:00+00:00," + SANS
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("\n".join([entete, sans, ligne]) + "\n")
+            rows = lp.charger(p)
+        txt = lp.resume_secondaire(rows)
+        self.assertIn("2 chaînes distinctes ; 1 avec infection(s) secondaire(s)", txt)
+        self.assertIn("secondary_infections", txt)
+        self.assertIn("Timestamp('2026-08-20", txt)                     # la liste avec virgules reste d'un seul tenant
+        self.assertIn("[88.0, 120.5]", txt)
+        self.assertIn("spore_lifespan_days", txt)
+
     def test_table_vide(self):
         self.assertEqual(lp.resume([]), "Table vide.")
 
