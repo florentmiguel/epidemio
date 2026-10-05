@@ -9,6 +9,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | Fichier | Rôle |
 |---|---|
 | `mildiou_primaire.py` | le moteur (primaire **et secondaire**) + ses paramètres (`PARAMS`) + une ligne de commande (le nom du fichier sera changé quand le dépôt accueillera l'oïdium et le botrytis) |
+| `historique_meteo.py` | historique météo horaire **local** (SQLite) : ne télécharge que les jours manquants, importe et exporte des CSV, compte les appels Open-Meteo |
 | `recuperer_meteo_horaire.py` | télécharge la météo horaire d'une position (Open-Meteo) → CSV (validé sur le VPS) |
 | `exporter_plasmopy.py` | convertit meteo.csv au format d'entrée de Plasmopy (témoin de comparaison) |
 | `diagnostic_infection.py` | retrouve quelles heures somment une force d'infection donnée (ex. celle de Plasmopy) |
@@ -18,7 +19,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 193 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 218 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -34,6 +35,42 @@ Le moteur évalue le **risque épidémiologique indépendamment de tout programm
 Une infection prédite n'est donc ni une alerte ni une absence d'alerte : c'est l'OAD qui la rapproche de l'état de
 protection. La **pluie cumulée depuis une date** est un fait météo neutre que le moteur peut fournir ; le seuil de
 lessivage, propre à chaque produit, reste à l'OAD. Aucune donnée de traitement n'entre dans le moteur.
+
+## Historique météo local (`historique_meteo.py`)
+Le passé d'une saison ne change pas : le télécharger en entier à chaque calcul coûte environ **20 unités d'appel**. Le module le
+garde sur disque (`~/epidemio_data/meteo.sqlite3`, ou `$EPIDEMIO_DATA_DIR`) et ne demande que ce qui manque :
+
+| Situation | Appels Open-Meteo | Unités |
+|---|---|---|
+| Démarrage à froid d'une position (une fois par an) | archive du 1er janvier à J-7, puis prévision | ≈ 20 |
+| Démarrage à froid avec un CSV existant (`importer`) | prévision seulement | ≈ 1 |
+| Rafraîchissement courant (durée de vie 1 h) | une requête de prévision (jours non consolidés + 7 à venir) | ≈ 1 |
+| Consolidation, une fois par jour | une petite requête d'archive | ≈ 1 |
+
+* **Priorité des sources** : `archive` et `import` sont fiables et ne sont jamais écrasées par une prévision ; une `prevision` est
+  remplacée par une prévision plus récente, puis par l'archive. Les heures d'archive sans température (jours récents pas encore
+  disponibles) ne sont pas stockées.
+* **Unités** : une requête de 14 jours et 10 variables au plus vaut 1 unité ; au-delà, au prorata (règle d'Open-Meteo).
+* **Deux processus en même temps** (deux workers gunicorn) : une réservation de 2 minutes par position évite le double téléchargement.
+* **Sécurité des données** : si la série ne commence pas au 1er janvier, le module refuse de répondre (`HistoriqueIncomplet`) plutôt
+  que de laisser le moteur calculer une maturité sur une saison tronquée. Les heures manquantes sont comptées et signalées.
+* **Mode sans archive** (`--sans-archive`) : seule l'API de prévision (passé de 92 jours au plus) est appelée, ce qui convient au
+  plan **Standard** d'Open-Meteo, dont l'offre n'inclut pas l'API historique. La série doit alors être amorcée par `importer`.
+
+```bash
+python3 historique_meteo.py importer meteo.csv --lat 49.25 --lon 3.96 --jusqu-a 2026-09-28   # amorçage sans appel d'archive
+python3 historique_meteo.py mettre-a-jour --lat 49.25 --lon 3.96 [--sans-archive] [--force]
+python3 historique_meteo.py exporter --lat 49.25 --lon 3.96 --sortie meteo.csv                  # remplace recuperer_meteo_horaire.py
+python3 historique_meteo.py etat        # positions stockées, heures, trous
+python3 historique_meteo.py usage       # requêtes et unités consommées (30 jours, aujourd'hui)
+```
+`importer` : sans `--jusqu-a`, les heures sont jugées fiables jusqu'à 7 jours avant la **date du fichier** (pas celle du jour) ;
+au-delà ce sont des prévisions, restées corrigeables.
+
+**Offre gratuite d'Open-Meteo** (page tarifs consultée le 05/10/2026) : 600 appels par minute, 5 000 par heure, 10 000 par jour,
+300 000 par mois, par adresse IP ; usage **non commercial** uniquement ; attribution requise (CC BY 4.0). Plans commerciaux :
+Standard (1 million d'appels par mois, sans API historique) et Professional (5 millions, avec) ; prix annoncés par l'éditeur :
+29 et 99 dollars par mois, à confirmer à la souscription.
 
 ## Infections secondaires (v0)
 **Vocabulaire : trois étapes à ne pas confondre.**
@@ -237,6 +274,17 @@ sporulation distinctes / taches concernées :
   le programme phytosanitaire peut l'empêcher. La première infection secondaire du modèle (03/06) est un **danger
   conditionnel** (conditions réunies si les sporanges de la nuit du 02/06 existent), qui repose sur une seule nuit
   marginale (HR entre 90 et 92 %) et que les observations disponibles ne permettent ni de confirmer ni d'infirmer.
+* **Effet de la libération des sporanges** (`--pluie-detachement 0,2`, profil à 90 %, saison 2026) :
+
+| | Sans condition de pluie (défaut) | Pluie >= 0,2 mm/h après la sporulation |
+|---|---|---|
+| Infections secondaires | 22 (génération 1 : 20, génération 2 : 2) | 17 (15 et 2) |
+| Première infection | 03/06 02 h (149 °C·h), puis 03/06 17 h (72 °C·h) | **04/06 00 h (342,5 °C·h)** |
+| Suivante | 04/06 00 h (342,5 °C·h) | 06/06 14 h (130 °C·h) |
+
+  Exiger une pluie ne fait pas disparaître l'infection : elle la décale d'environ une journée. Les deux périodes d'humidité
+  du 03/06 (sans pluie) disparaissent ; la période pluvieuse du 04/06 (342,5 °C·h, soit près de 7 fois le seuil) subsiste
+  dans les deux cas. L'infection est donc solide côté humectation, et fragile seulement côté source (une nuit marginale).
 * Profil `calage_2026` : seuil d'humidité ramené de 92 à 90 % (durée 4 h inchangée). Les résultats de sensibilité ci-dessus
   (secondaire) ont été obtenus AVANT cet ajustement, avec 92 % ; à refaire.
 
