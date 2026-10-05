@@ -899,6 +899,21 @@ class TestProfil(unittest.TestCase):
         self.assertIsNone(p["infection"]["mouillage_min_h"])
         self.assertIsNone(p["humectation"]["tolerance_h"])
 
+    def test_seuil_d_humidite_de_sporulation_du_profil(self):
+        self.assertEqual(self.PROFIL["sporulation"]["hr_min"], 90.0)
+        self.assertEqual(self.PROFIL["sporulation"]["fenetre_j"], 15)
+        self.assertEqual(mp.PARAMS["sporulation"]["hr_min"], 92.0)             # le défaut (texte de travail) ne change pas
+
+    def test_air_a_91_pour_cent_fait_sporuler_avec_le_profil_pas_avec_le_defaut(self):
+        r = fusion(plage(10, 18, hr=85.0), plage(20, 33, pluie=4.0))
+        r.update(plage(33, 1700, temp=12.0))
+        r.update(plage(369, 417, hr=91.0, temp=12.0))                            # deux nuits à HR 91 %
+        rows = serie(DEBUT, 1700, regles=r)
+        defaut = lancer(rows, FORCE_AVRIL)["cycles"][0]
+        profil = lancer(rows, mp.fusionner(self.PROFIL, FORCE_AVRIL))["cycles"][0]
+        self.assertNotIn("sporulations", defaut)                                 # 91 % < 92 %
+        self.assertGreaterEqual(len(profil["sporulations"]), 1)                  # 91 % >= 90 %
+
     def test_le_profil_ne_modifie_pas_les_defauts(self):
         self.assertEqual(mp.PARAMS["dispersion"]["fenetre_h"], 1)
         self.assertTrue(mp.PARAMS["infection"]["soustraire_base"])

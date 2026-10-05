@@ -57,6 +57,58 @@ class TestCarteSporulation(unittest.TestCase):
         self.assertEqual(sp.nuits_dans(res, "05-20", "06-30"), (2, 2))
         self.assertEqual(sp.nuits_dans({"cycles": [{}]}, "05-20", "06-30"), (0, 0))
 
+    def test_detail_liste_le_cycle_et_ses_deux_nuits(self):
+        d = sp.detail(scenario(), LAT, LON, 92, 4, base=FORCE_AVRIL, du="04-20", au="05-10", now=DEBUT)
+        self.assertEqual(len(d["cycles"]), 1)
+        k = d["cycles"][0]
+        self.assertEqual(len(k["nuits"]), 2)
+        self.assertEqual(d["nuits"], k["nuits"])
+        self.assertEqual(k["taches"][:10], "2026-04-27")
+        self.assertEqual(k["fin_vie"], "2026-05-12")                              # 27/04 + 15 jours
+        self.assertIsNotNone(d["premiere_secondaire"])
+
+    def test_detail_montre_aussi_les_cycles_vivants_sans_nuit(self):
+        d = sp.detail(scenario(), LAT, LON, 94, 4, base=FORCE_AVRIL, du="04-20", au="05-10", now=DEBUT)
+        self.assertEqual([len(k["nuits"]) for k in d["cycles"]], [0])             # vivant, mais aucune nuit favorable
+        self.assertEqual(d["nuits"], [])
+
+    def test_detail_exclut_les_cycles_dont_les_taches_sont_mortes_ou_absentes(self):
+        mort = sp.detail(scenario(), LAT, LON, 92, 4, base=FORCE_AVRIL, du="06-01", au="06-30", now=DEBUT)
+        self.assertEqual(mort["cycles"], [])                                      # taches mortes le 12/05
+        avant = sp.detail(scenario(), LAT, LON, 92, 4, base=FORCE_AVRIL, du="04-01", au="04-20", now=DEBUT)
+        self.assertEqual(avant["cycles"], [])                                     # taches visibles le 27/04 seulement
+
+    def test_detail_est_coherent_avec_la_grille(self):
+        g = sp.grille(scenario(), LAT, LON, base=FORCE_AVRIL, hrs=(92,), durees=(4,), du="04-20", au="05-10", now=DEBUT)
+        d = sp.detail(scenario(), LAT, LON, 92, 4, base=FORCE_AVRIL, du="04-20", au="05-10", now=DEBUT)
+        self.assertEqual(len(d["nuits"]), g[(92, 4)]["nuits"])
+        self.assertEqual(sum(1 for k in d["cycles"] if k["nuits"]), g[(92, 4)]["taches"])
+
+    def test_format_du_detail(self):
+        d = sp.detail(scenario(), LAT, LON, 92, 4, base=FORCE_AVRIL, du="04-20", au="05-10", now=DEBUT)
+        txt = sp.formater_detail(d, "92", 4, "04-20", "05-10")
+        self.assertIn("DÉTAIL : HR >= 92 %, 4 h", txt)
+        self.assertIn("Un « cycle » est un épisode d'infection primaire", txt)
+        self.assertIn("1 cycle(s) avec des taches vivantes dans la fenêtre, dont 1 avec au moins une nuit", txt)
+        self.assertIn("2 nuit(s) distincte(s)", txt)
+
+    def test_ligne_de_commande_detail(self):
+        rows = scenario()
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "temperature_2m", "relative_humidity_2m", "precipitation", "dew_point_2m"])
+            for r in rows:
+                w.writerow([r["t"].strftime("%Y-%m-%dT%H:%M"), r["temp"], r["hr"], r["pluie"], ""])
+            chemin = f.name
+        try:
+            s = io.StringIO()
+            with contextlib.redirect_stdout(s):
+                sp.main([chemin, "--lat", "49.25", "--lon", "4.03", "--du", "04-20", "--au", "05-10", "--detail", "90", "4"])
+        finally:
+            os.unlink(chemin)
+        self.assertIn("DÉTAIL : HR >= 90 %, 4 h", s.getvalue())
+        self.assertNotIn("CRITÈRE DE SPORULATION", s.getvalue())
+
     def test_format_lisible(self):
         txt = sp.formater(self.g, "04-20", "05-10", hrs=(90, 92, 94), durees=(4, 6), reperes=sp.REPERES)
         self.assertIn("NUITS DE SPORULATION ENTRE LE 04-20 ET LE 05-10", txt)

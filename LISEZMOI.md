@@ -18,7 +18,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 185 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 193 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -184,6 +184,31 @@ Réserve : le programme phytosanitaire peut lui-même limiter la fructification 
 petit matin. `sensibilite_sporulation.py` cartographie l'espace entre les critères : la sortie du moteur liste désormais
 toutes les nuits de sporulation de chaque tache (`sporulations`).
 
+**Carte du critère de sporulation** (`sensibilite_sporulation.py`, saison 2026, fenêtre du 20/05 au 30/06). Nuits de
+sporulation distinctes / taches concernées :
+
+| Humidité minimale | 3 h | 4 h | 5 h | 6 h |
+|---|---|---|---|---|
+| HR ≥ 80 % | 18 / 5 | 13 / 5 | 8 / 5 | 6 / 5 |
+| HR ≥ 85 % | 10 / 5 | 6 / 5 | 4 / 5 | 4 / 5 |
+| HR ≥ 88 % | 5 / 5 | 3 / 4 | 3 / 4 | 2 / 4 |
+| HR ≥ 90 % | 3 / 4 | **2 / 4** | 2 / 4 | 1 / 3 |
+| HR ≥ 92 % | 2 / 4 | **0 / 0** (ancien critère) | 0 / 0 | 0 / 0 |
+| HR ≥ 94 % | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+* Le critère du texte de travail et de Plasmopy (HR ≥ 92 %, 4 h) est au bord d'une falaise : 0 nuit, alors que 90 % ou 3 h
+  en donnent 2. Un seuil aussi serré est fragile face à l'erreur de l'humidité d'une réanalyse (quelques %).
+* La zone « faible mais non nulle » (1 à 3 nuits) couvre HR 88 à 92 % pour 3 à 6 h. **Dans toutes ces cases, la première
+  infection secondaire est le 03/06** (et non le 28/08) ; le nombre total d'infections varie de 11 à 23.
+* **Ce que comptent les cases** : « nuits distinctes / taches » ne compte pas des taches d'huile isolées mais des **cycles
+  primaires**, c'est-à-dire des épisodes d'infection dont les taches apparaissent ensemble (une cohorte) et restent vivantes
+  15 jours. Chaque cycle sporule à chaque nuit favorable pendant cette durée ; une même nuit peut donc servir plusieurs
+  cycles. « 2 / 4 » signifie : 2 nuits favorables dans la fenêtre, 4 cohortes de taches qui en ont profité.
+  `--detail HR DUREE` (ex. `--detail 90 4`) liste ces cycles avec leurs dates d'infection, d'apparition des taches et de
+  sporulation, y compris ceux dont les taches sont vivantes mais sans nuit favorable.
+* Profil `calage_2026` : seuil d'humidité ramené de 92 à 90 % (durée 4 h inchangée). Les résultats de sensibilité ci-dessus
+  (secondaire) ont été obtenus AVANT cet ajustement, avec 92 % ; à refaire.
+
 **Références** (accès libre) : Brischetto, Bove, Fedele, Rossi (2021), *Front. Plant Sci.* 12:636607 ; Brischetto, Bove,
 Languasco, Rossi (2020), *Front. Plant Sci.* 11:1187 ; Kennelly et al. (2007), *Phytopathology* 97:512 ; Caffi et al. (2013),
 *Phytopathology* 103:64 ; Orlandini, Massetti, Dalla Marta (2008), *Comput. Electron. Agric.* 64:149 ;
@@ -264,7 +289,7 @@ Une option de la ligne de commande surcharge le profil.
 | Infection | T × h, T > 8 °C, **sans plafond**, 50 °C·h, cumul libre, 24 h, pas de minimum | dates d'infection identiques à Plasmopy |
 | Humectation | HR ≥ 90 % (proxy, sans capteur) | hypothèse, rappel observé robuste |
 | Incubation | table de Goidanich | fin d'incubation à ≤ 13 h de Plasmopy |
-| Sporulation | HR ≥ 92 %, T ≥ 12 °C, 4 h de nuit continues | règle du texte |
+| Sporulation | **HR ≥ 90 %** (texte et Plasmopy : 92 %), T ≥ 12 °C, 4 h de nuit continues | **calé** sur l'observation de terrain 2026 et Lalancette ; voir la carte du critère |
 | Durée de vie d'une tache | 15 jours | Orlandini et al. 2008 (la référence Plasmopy n'en a pas) |
 
 ## Utilisation

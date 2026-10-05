@@ -183,7 +183,11 @@ PROFILS = {
         "humectation": {"hr_pct": 90.0, "tolerance_h": None},
         # Durée de vie d'une tache : 15 jours (Orlandini et al. 2008 ; la référence n'en a pas : ses taches de juin
         # sporulent le 19/08).
-        "sporulation": {"fenetre_j": 15},
+        # Seuil d'humidité de la sporulation : 90 % au lieu de 92 % (texte de travail, Plasmopy). CALÉ sur une observation :
+        # des taches sont sorties en mai-juin avec une fructification faible mais non nulle (clients, 2026). À 92 % pendant
+        # 4 h le moteur prédit zéro nuit de sporulation du 20/05 au 30/06 ; à 90 %, 2 nuits (carte du critère). Lalancette
+        # (via Franche 2012) retient aussi 90 %. Dans toute la zone compatible, la 1re infection secondaire est le 03/06.
+        "sporulation": {"fenetre_j": 15, "hr_min": 90.0},
     },
 }
 

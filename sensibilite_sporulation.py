@@ -18,6 +18,7 @@ Usage :
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta
 
 import mildiou_primaire as mp
 
@@ -67,6 +68,46 @@ def formater(g: dict, du: str, au: str, hrs=HR_DEFAUT, durees=DUREES_DEFAUT, rep
     return "\n".join(L)
 
 
+FORMAT = "%Y-%m-%dT%H:%MZ"
+
+
+def detail(rows, lat, lon, hr, duree, base=None, du="05-20", au="06-30", now=None) -> dict:
+    """Pour un couple (HR, durée) : les cycles primaires dont les taches sont VIVANTES dans la fenêtre, avec leurs nuits de
+    sporulation dans la fenêtre. Explique les nombres « nuits / taches » de la carte."""
+    params = mp.fusionner(base or {}, {"sporulation": {"hr_min": float(hr), "nuit_continue_h": int(duree)}})
+    res = mp.calculer_saison(rows, lat, lon, params=params, now=now)
+    vie_j = res["parametres"]["sporulation"]["fenetre_j"]
+    cycles = []
+    for c in res["cycles"]:
+        tach = c.get("taches", {}).get("t")
+        if not tach:
+            continue
+        an = tach[:4]
+        fin_vie = (datetime.strptime(tach, FORMAT) + timedelta(days=vie_j)).strftime("%Y-%m-%d") if vie_j else None
+        if tach[:10] > f"{an}-{au}" or (fin_vie is not None and fin_vie < f"{an}-{du}"):
+            continue                                            # taches pas encore apparues, ou déjà mortes
+        nuits = sorted({s[:10] for s in c.get("sporulations", []) if du <= s[5:10] <= au})
+        cycles.append({"id": c["id"], "infection": c["infection"]["t"], "taches": tach, "fin_vie": fin_vie, "nuits": nuits})
+    secondaires = sorted(e["infection"]["t"] for e in res["secondaires"])
+    return {"cycles": cycles, "nuits": sorted({n for k in cycles for n in k["nuits"]}),
+            "premiere_secondaire": secondaires[0] if secondaires else None}
+
+
+def formater_detail(d: dict, hr, duree, du: str, au: str) -> str:
+    L = [f"DÉTAIL : HR >= {hr} %, {duree} h, fenêtre du {du} au {au}",
+         "  Un « cycle » est un épisode d'infection primaire : ses taches d'huile apparaissent ensemble (cohorte) et",
+         "  restent vivantes 15 jours. Une même nuit favorable peut faire sporuler plusieurs cohortes à la fois.", "",
+         "  cycle  infection          taches visibles    taches vivantes jusqu'au  nuits de sporulation dans la fenêtre"]
+    for k in d["cycles"]:
+        nuits = ", ".join(n[5:] for n in k["nuits"]) or "aucune"
+        L.append(f"  #{k['id']:>4}  {k['infection'][:16]}  {k['taches'][:16]}  {(k['fin_vie'] or 'illimitée'):<24}  {nuits}")
+    avec = sum(1 for k in d["cycles"] if k["nuits"])
+    L += ["", f"  {len(d['cycles'])} cycle(s) avec des taches vivantes dans la fenêtre, dont {avec} avec au moins une nuit "
+              f"de sporulation ; {len(d['nuits'])} nuit(s) distincte(s) : {', '.join(n[5:] for n in d['nuits']) or '—'}",
+          f"  première infection secondaire de la saison : {(d['premiere_secondaire'] or '—')[:10]}"]
+    return "\n".join(L)
+
+
 REPERES = ["texte de travail et Plasmopy = HR >= 92 %, 4 h", "Franche = HR >= 90 %, 6 h", "Rossi 2021 = HR >= 80 %, 3 h"]
 
 
@@ -78,8 +119,16 @@ def main(argv=None):
     ap.add_argument("--profil", choices=sorted(mp.PROFILS), default="calage_2026")
     ap.add_argument("--du", default="05-20", help="début de la fenêtre, MM-JJ (défaut 05-20)")
     ap.add_argument("--au", default="06-30", help="fin de la fenêtre, MM-JJ (défaut 06-30)")
+    ap.add_argument("--detail", nargs=2, type=float, metavar=("HR", "DUREE"),
+                    help="liste les cycles et les nuits d'un couple (ex. --detail 90 4) au lieu de la carte")
     a = ap.parse_args(argv)
     rows = mp.charger_csv(a.csv)
+    if a.detail:
+        hr, duree = a.detail[0], int(a.detail[1])
+        d = detail(rows, a.lat, a.lon, hr, duree, base=mp.charger_profil(a.profil), du=a.du, au=a.au)
+        print(f"Profil de base : {a.profil}\n")
+        print(formater_detail(d, f"{hr:g}", duree, a.du, a.au))
+        return
     print(f"Profil de base : {a.profil}\n")
     print(formater(grille(rows, a.lat, a.lon, base=mp.charger_profil(a.profil), du=a.du, au=a.au), a.du, a.au,
                    reperes=REPERES))
