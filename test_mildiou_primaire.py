@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Tests du moteur mildiou primaire — météos synthétiques, une règle par test."""
 import csv
+import math
 import os
 import tempfile
 import unittest
@@ -665,6 +666,9 @@ class TestSecondaire(unittest.TestCase):
     def test_defauts_secondaire_sources_litterature(self):
         s = mp.PARAMS["secondaire"]
         self.assertEqual((s["tolerance_h"], s["survie"]), (1, "vpd"))
+        self.assertEqual(s["survie_vpd"]["formule_vpd"], "steubing")
+        self.assertIsNone(s["pluie_detachement_mm"])
+        self.assertIsNone(s["productivite_min"])
         self.assertEqual(s["survie_vpd"]["attaches"], [9.27, -1.12, 0.04])
         self.assertEqual(s["survie_vpd"]["detaches"], [5.67, -0.47, 0.02])
 
@@ -709,6 +713,49 @@ class TestSecondaire(unittest.TestCase):
         off = self.sec(extra, {"secondaire": {"actif": False}})
         self.assertEqual(off["secondaires"], [])
         self.assertTrue(all(d["force_secondaire_dh"] == 0 for d in off["jours"]))
+
+    def test_detachement_par_la_pluie(self):
+        humectation = plage(400, 402, hr=95.0, temp=25.0)                          # humectation par l'humidité seule, sans pluie
+        pluie = {"secondaire": {"pluie_detachement_mm": 0.2}}
+        self.assertEqual(len(self.sec(humectation)["secondaires"]), 1)             # défaut : aucune condition de pluie
+        self.assertEqual(self.sec(humectation, pluie)["secondaires"], [])         # exigence de pluie : pas de détachement
+        # une pluie de 0,3 mm entre la sporulation (h382) et l'humectation (h400) libère les sporanges
+        avant = fusion(humectation, {390: {"pluie": 0.3}})
+        e = self.sec(avant, pluie)["secondaires"]
+        self.assertEqual([x["infection"]["t"] for x in e], [self.heure(401)])
+        # une pluie trop faible, ou tombée APRÈS l'humectation, ne change rien
+        self.assertEqual(self.sec(fusion(humectation, {390: {"pluie": 0.1}}), pluie)["secondaires"], [])
+        self.assertEqual(self.sec(fusion(humectation, {420: {"pluie": 0.3}}), pluie)["secondaires"], [])
+
+    def test_productivite_minimale_des_taches(self):
+        humectation = plage(400, 402, hr=95.0, temp=25.0)
+        # la base ne compte qu'UNE nuit de sporulation (RS = 0,99) : un seuil de 0,5 la garde, un seuil de 1 l'écarte
+        self.assertEqual(len(self.sec(humectation, {"secondaire": {"productivite_min": 0.5}})["secondaires"]), 1)
+        self.assertEqual(self.sec(humectation, {"secondaire": {"productivite_min": 1.0}})["secondaires"], [])
+
+    def test_ligne_de_commande_nouvelles_options(self):
+        import contextlib, io
+        rows = serie(DEBUT, 1700, regles=fusion(self.regles_base(), plage(400, 402, hr=95.0, temp=25.0)))
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "temperature_2m", "relative_humidity_2m", "precipitation", "dew_point_2m"])
+            for r in rows:
+                w.writerow([r["t"].strftime("%Y-%m-%dT%H:%M"), r["temp"], r["hr"], r["pluie"], ""])
+            chemin = f.name
+        try:
+            def cli(*args):
+                s = io.StringIO()
+                with contextlib.redirect_stdout(s):
+                    mp.main([chemin, "--lat", "49.25", "--lon", "4.03", "--maturite", "2026-04-11", *args])
+                return s.getvalue()
+            normal, vine, pluie, prod = (cli(), cli("--survie", "vinemild"), cli("--pluie-detachement", "0.2"),
+                                         cli("--productivite-min", "1.0"))
+        finally:
+            os.unlink(chemin)
+        self.assertIn("INFECTIONS SECONDAIRES : 1", normal)
+        self.assertIn("INFECTIONS SECONDAIRES : 1", vine)
+        self.assertIn("INFECTIONS SECONDAIRES : 0", pluie)
+        self.assertIn("INFECTIONS SECONDAIRES : 0", prod)
 
     def test_ligne_de_commande(self):
         import contextlib, io
@@ -763,22 +810,72 @@ class TestSurvieSporanges(unittest.TestCase):
         self.assertAlmostEqual(1 / (24 * sec), 1 / (0.5 / 1.43 + 0.5 / 2.91), delta=0.02)     # ≈ 1,9 jour
         self.assertGreater(sec, 3 * sature)
 
+    def test_deficit_de_survie_definition_des_sources(self):
+        self.assertAlmostEqual(mp.deficit_survie(20.0, 50.0), 10.0, places=6)               # T x (1 - HR/100), Steubing
+        self.assertAlmostEqual(mp.deficit_survie(20.0, 50.0, "buck"), mp.vpd_hpa(20.0, 50.0), places=6)
+        self.assertEqual(mp.deficit_survie(20.0, None), 0.0)
+        # côté décroissant de la parabole, un déficit plus grand (Buck) raccourcit la vie des sporanges
+        steubing = mp.mortalite_horaire(10.0, 60.0, self.PSV)
+        buck = mp.mortalite_horaire(10.0, 60.0, dict(self.PSV, formule_vpd="buck"))
+        self.assertGreater(buck, steubing)
+
+    def test_vinemild_valeurs_de_la_courbe(self):
+        pv = mp.PARAMS["secondaire"]["survie_vinemild"]
+        self.assertAlmostEqual(mp.mortalite_vinemild(20.0, 50.0, pv), 5.20e-3, places=6)    # nœud du tableau
+        self.assertAlmostEqual(mp.mortalite_vinemild(20.0, 60.0, pv), 5.05e-3, places=6)    # milieu entre HR 50 et 70
+        self.assertAlmostEqual(mp.mortalite_vinemild(15.0, 70.0, pv), 4.80e-3, places=6)    # milieu entre 10 et 20 °C
+        self.assertAlmostEqual(mp.mortalite_vinemild(50.0, 10.0, pv), 9.15e-3, places=6)    # hors bornes : valeur du bord
+        self.assertAlmostEqual(mp.mortalite_vinemild(20.0, None, pv), 4.65e-3, places=6)    # HR absente : 90 %
+
+    def test_vinemild_vie_de_7_a_9_jours_dans_les_conditions_de_champagne(self):
+        pv = mp.PARAMS["secondaire"]["survie_vinemild"]
+        for temp in (5.0, 15.0, 25.0):
+            for hr in (50.0, 70.0, 90.0):
+                heures = 1 / mp.mortalite_vinemild(temp, hr, pv)
+                self.assertTrue(150 <= heures <= 225, (temp, hr, heures))               # 6,3 à 9,4 jours
+
+    def test_vinemild_decroit_avec_la_temperature_et_la_secheresse(self):
+        pv = mp.PARAMS["secondaire"]["survie_vinemild"]
+        self.assertGreater(mp.mortalite_vinemild(35.0, 30.0, pv), mp.mortalite_vinemild(10.0, 30.0, pv))
+        self.assertGreater(mp.mortalite_vinemild(30.0, 30.0, pv), mp.mortalite_vinemild(30.0, 90.0, pv))
+
+    def test_vinemild_vit_plus_longtemps_que_blaeser_en_air_moyennement_sec(self):
+        # T = 12 °C, HR = 60 % : Blaeser ≈ 103 h ; Vinemild ≈ 207 h. Une humectation 158 h après la sporulation
+        def infections(survie):
+            r = fusion(plage(10, 18, hr=85.0), plage(20, 33, pluie=4.0))
+            r.update(plage(33, 1700, temp=12.0, hr=60.0))
+            r.update(plage(369, 383, hr=95.0, temp=12.0))
+            r.update(plage(540, 542, hr=95.0, temp=25.0))
+            res = lancer(serie(DEBUT, 1700, regles=r), mp.fusionner(FORCE_AVRIL, {"secondaire": {"survie": survie}}))
+            return len(res["secondaires"])
+        self.assertEqual(infections("vpd"), 0)
+        self.assertEqual(infections("vinemild"), 1)
+
+    def test_productivite_relative_des_taches(self):
+        self.assertAlmostEqual(mp.productivite_relative(1), 0.9948, places=3)
+        self.assertAlmostEqual(mp.productivite_relative(2) / mp.productivite_relative(1), math.exp(-0.7), places=9)   # /2 par nuit
+        self.assertEqual(mp.nuits_productives(list(range(10)), None), list(range(10)))
+        self.assertEqual(len(mp.nuits_productives(list(range(10)), 0.1)), 4)       # RS : 0,99 0,49 0,25 0,12 | 0,06
+        self.assertEqual(len(mp.nuits_productives(list(range(10)), 0.25)), 2)      # RS(3) = 0,2456 < 0,25
+        self.assertEqual(mp.nuits_productives(list(range(10)), 1.0), [])
+
     def test_fin_de_disponibilite(self):
         self.assertEqual(mp.fin_disponibilite([0.01] * 500, 10), 110)           # 100 heures de survie
         self.assertEqual(mp.fin_disponibilite([0.01] * 50, 10), 50)             # la série s'arrête avant la mort
         self.assertEqual(mp.fin_disponibilite([1.0] * 5, 2), 3)                 # mortalité totale en une heure
 
     def test_en_air_sec_les_sporanges_meurent_plus_vite_qu_en_air_humide(self):
-        # même scénario, seule l'humidité des heures sèches change : la fenêtre des sporanges se raccourcit
+        # même scénario, seule l'humidité des heures sèches change. À 12 °C : HR 85 % -> survie ≈ 140 h ; HR 30 % -> ≈ 69 h.
+        # Une humectation 88 h après la sporulation (h382 -> h470) trouve des sporanges vivants en air humide, morts en air sec.
         def infections(hr_sec):
             r = fusion(plage(10, 18, hr=85.0), plage(20, 33, pluie=4.0))
             r.update(plage(33, 1700, temp=12.0, hr=hr_sec))
             r.update(plage(369, 383, hr=95.0, temp=12.0))                       # une heure de sporulation (h382)
-            r.update(plage(450, 452, hr=95.0, temp=25.0))                       # humectation 68 h plus tard
+            r.update(plage(470, 472, hr=95.0, temp=25.0))                       # humectation 88 h plus tard
             res = lancer(serie(DEBUT, 1700, regles=r), mp.fusionner(FORCE_AVRIL, {"secondaire": {"survie": "vpd"}}))
             return len(res["secondaires"])
-        self.assertEqual(infections(hr_sec=85.0), 1)       # air humide : sporanges encore viables à h450
-        self.assertEqual(infections(hr_sec=30.0), 0)       # air très sec : morts avant h450 (≈ 60 h de survie à 12 °C)
+        self.assertEqual(infections(hr_sec=85.0), 1)
+        self.assertEqual(infections(hr_sec=30.0), 0)
 
 
 class TestProfil(unittest.TestCase):

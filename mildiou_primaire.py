@@ -130,17 +130,36 @@ PARAMS = {
         "mouillage_min_h": 1,                  # [P] mouillage >= 60 min
         "tolerance_h": 1,                      # [R] Rossi et al. 2021 : période d'infection = humectation continue ou
                                                #     interrompue au plus 1 h
-        "survie": "vpd",                       # "vpd" : les sporanges meurent à un rythme fonction du déficit de saturation
-                                               #     (équations de Blaeser & Weltzien 1979, d'après Brischetto et al. 2020) ;
-                                               #     "fixe" : durée_vie_sporanges_h
+        "survie": "vpd",                       # "vpd" : mortalité fonction du déficit de saturation (Blaeser & Weltzien 1979,
+                                               #     d'après Brischetto et al. 2020 et Franche 2012, Eq. 7) ; vie de 2 à 9 jours
+                                               # "vinemild" : courbe de Blaise & Gessler 1990 (Franche 2012, annexe 5) ; 4,5 à 9 jours
+                                               # "fixe" : durée_vie_sporanges_h
         "duree_vie_sporanges_h": 72,           # [D] mode « fixe » seulement
         "survie_vpd": {
-            "attaches": [9.27, -1.12, 0.04],   # [R] survie (jours) d'un sporange encore sur sporangiophore : a + b.VPD + c.VPD²
-            "detaches": [5.67, -0.47, 0.02],   # [R] idem, sporange détaché
+            "attaches": [9.27, -1.12, 0.04],   # [R] survie (jours) d'un sporange encore sur sporangiophore : a + b.V + c.V²
+            "detaches": [5.67, -0.47, 0.02],   # [R] idem, sporange détaché. Brischetto 2020 : c = 0,02 ; Franche 2012 (Eq. 7,
+                                               #     d'après Rossi) : c = 0,01 -> vie de 6 h à 6 jours : À TRANCHER
             "poids_attaches": 0.5,             # [R] Brischetto 2020 : même probabilité de mourir avant ou après détachement
-            # Au-delà du VPD qui minimise le trinôme (14 et 11,75 hPa), la survie reste constante : le trinôme remonte
-            # ensuite (non physique), nous le plafonnons.
+            "formule_vpd": "steubing",         # [R] V = T x (1 - HR/100) (Steubing 1965), définition de Brischetto 2020 et de
+                                               #     Franche 2012 pour ces trinômes ; "buck" : déficit de saturation physique
+            # Au-delà du V qui minimise le trinôme (14 et 11,75), la survie reste constante : la parabole remonte ensuite
+            # (non physique), nous la plafonnons.
         },
+        "survie_vinemild": {                   # [R] progrès horaire de la mortalité des conidies (x 1e-3 par heure), LU SUR LE
+                                               #     GRAPHIQUE de l'annexe 5 de Franche 2012 (précision d'environ 2 %)
+            "temperatures": [0, 10, 20, 30, 40],
+            "hr": [30, 50, 70, 90],
+            "mortalite_pour_mille": [[4.75, 5.00, 5.50, 6.60, 9.15],     # HR 30 %
+                                     [4.70, 4.85, 5.20, 5.85, 7.35],     # HR 50 %
+                                     [4.65, 4.70, 4.90, 5.25, 6.00],     # HR 70 %
+                                     [4.52, 4.58, 4.65, 4.75, 4.93]],    # HR 90 %
+        },
+        "pluie_detachement_mm": None,          # None : les sporanges sont dans l'air même sans pluie (Plasmopy, Rossi et al. 2021).
+                                               #     0,2 : un sporange ne se détache qu'après une pluie horaire >= 0,2 mm
+                                               #     (Franche 2012, modèles « pluie seule ») — À TRANCHER, effet important
+        "productivite_min": None,              # None : toutes les nuits de sporulation comptent. Sinon, une tache n'alimente
+                                               #     que les nuits dont la productivité relative RS = exp(5.3 - 0.7 n) / 100
+                                               #     (Kennelly 2007 via Franche 2012, Eq. 13) reste >= ce seuil (0,1 : 4 nuits)
     },
 
     "sensibilite": {                           # [F] BBCH comme coefficient, pas comme condition binaire
@@ -318,6 +337,13 @@ def vpd_hpa(temp, hr) -> float:
     return max(0.0, es * (1.0 - hr / 100.0))
 
 
+def deficit_survie(temp, hr, formule: str = "steubing") -> float:
+    """Variable des trinômes de survie : T x (1 - HR/100) (Steubing 1965, définition des sources) ou VPD physique (Buck)."""
+    if hr is None:
+        return 0.0
+    return vpd_hpa(temp, hr) if formule == "buck" else max(0.0, temp * (1.0 - hr / 100.0))
+
+
 def survie_jours(coefs, vpd: float) -> float:
     """Survie (jours) d'un sporange : trinôme en VPD, maintenu constant au-delà de son minimum (sommet de la parabole)."""
     a, b, cc = coefs
@@ -328,9 +354,44 @@ def survie_jours(coefs, vpd: float) -> float:
 def mortalite_horaire(temp, hr, psv: dict) -> float:
     """Fraction de sporanges qui meurent pendant une heure : 1 / (24 x survie en jours), moyenne pondérée des sporanges
     attachés et détachés (Blaeser & Weltzien 1979, d'après Brischetto et al. 2020)."""
-    v = vpd_hpa(temp, hr)
+    v = deficit_survie(temp, hr, psv.get("formule_vpd", "steubing"))
     w = psv["poids_attaches"]
     return (w / survie_jours(psv["attaches"], v) + (1.0 - w) / survie_jours(psv["detaches"], v)) / 24.0
+
+
+def mortalite_vinemild(temp, hr, pv: dict) -> float:
+    """Fraction de conidies qui meurent pendant une heure selon la courbe de Vinemild (interpolation bilinéaire du tableau,
+    hors bornes : valeur du bord ; HR absente : 90 %)."""
+    temps, hrs, tab = pv["temperatures"], pv["hr"], pv["mortalite_pour_mille"]
+
+    def pos(x, grille):
+        x = min(max(x, grille[0]), grille[-1])
+        for k in range(len(grille) - 1):
+            if x <= grille[k + 1]:
+                return k, (x - grille[k]) / (grille[k + 1] - grille[k])
+        return len(grille) - 2, 1.0
+
+    i, a = pos(90.0 if hr is None else hr, hrs)
+    j, b = pos(temp, temps)
+    bas = tab[i][j] * (1 - b) + tab[i][j + 1] * b
+    haut = tab[i + 1][j] * (1 - b) + tab[i + 1][j + 1] * b
+    return (bas * (1 - a) + haut * a) / 1000.0
+
+
+def productivite_relative(n: int) -> float:
+    """Productivité relative d'une tache à sa n-ième sporulation (n >= 1) : exp(5,3 - 0,7 n) / 100 (Kennelly 2007, d'après
+    Franche 2012, Eq. 13). Elle est divisée par 2 à chaque sporulation."""
+    return math.exp(5.3 - 0.7 * n) / 100.0
+
+
+def nuits_productives(nuits: list, seuil) -> list:
+    """Les premières nuits de sporulation d'une tache dont la productivité relative reste >= seuil (None : toutes)."""
+    if seuil is None:
+        return nuits
+    k = 0
+    while k < len(nuits) and productivite_relative(k + 1) >= seuil:
+        k += 1
+    return nuits[:k]
 
 
 def fin_disponibilite(mor, i0: int) -> int:
@@ -389,19 +450,28 @@ def calculer_secondaires(rows, idx, p, tz, tmoy_jour, nuits, cycles):
     ps2, pinc, ps = p["secondaire"], p["incubation"], p["sporulation"]
     n, duree = len(rows), int(ps2["duree_vie_sporanges_h"])
     couv_gen, couv_src = [None] * n, [None] * n        # génération minimale et source qui couvrent chaque heure
-    mor = ([mortalite_horaire(r["temp"], r["hr"], ps2["survie_vpd"]) for r in rows]
-           if ps2["survie"] == "vpd" else None)
+    if ps2["survie"] == "vpd":
+        mor = [mortalite_horaire(r["temp"], r["hr"], ps2["survie_vpd"]) for r in rows]
+    elif ps2["survie"] == "vinemild":
+        mor = [mortalite_vinemild(r["temp"], r["hr"], ps2["survie_vinemild"]) for r in rows]
+    else:
+        mor = None
+    pluie_min = ps2.get("pluie_detachement_mm")
 
     def ajouter_source(i0, gen, src):
         """Une nuit de sporulation en i0 : les sporanges sont disponibles jusqu'à leur mort (cumul de mortalité >= 1)
-        ou, en mode « fixe », pendant duree_vie_sporanges_h."""
+        ou, en mode « fixe », pendant duree_vie_sporanges_h. Avec pluie_detachement_mm, ils ne sont disponibles qu'à partir
+        de la première pluie horaire suffisante qui suit la sporulation (aucune pluie : jamais)."""
         fin = min(n, i0 + duree) if mor is None else fin_disponibilite(mor, i0)
-        for i in range(i0, fin):
+        debut = i0
+        if pluie_min is not None:
+            debut = next((k for k in range(i0, fin) if (rows[k]["pluie"] or 0.0) >= pluie_min), fin)
+        for i in range(debut, fin):
             if couv_gen[i] is None or gen < couv_gen[i]:
                 couv_gen[i], couv_src[i] = gen, src
 
     for c in cycles:
-        for i0 in c.get("_nuits_spor", []):
+        for i0 in nuits_productives(c.get("_nuits_spor", []), ps2.get("productivite_min")):
             ajouter_source(i0, 0, {"type": "primaire", "id": c["id"]})
 
     evenements, force_jour = [], {}
@@ -437,7 +507,7 @@ def calculer_secondaires(rows, idx, p, tz, tmoy_jour, nuits, cycles):
                     ev["sporulation"] = {"t": rows[evo["nuits"][0]]["t"]}
                     ev["nuits_sporulation"] = len(evo["nuits"])
                     ev["statut"] = "sporulation"
-                    for i0 in evo["nuits"]:
+                    for i0 in nuits_productives(evo["nuits"], ps2.get("productivite_min")):
                         ajouter_source(i0, ev["generation"], {"type": "secondaire", "id": ev["id"]})
                 elif evo["fenetre_ecoulee"]:
                     ev["statut"] = "taches_sans_sporulation"
@@ -776,6 +846,12 @@ def main(argv=None):
     ap.add_argument("--vie-sporanges", type=int,
                     help="secondaire : durée FIXE de disponibilité des sporanges après une nuit de sporulation, en heures "
                          "(désactive la survie selon le déficit de saturation)")
+    ap.add_argument("--survie", choices=("vpd", "vinemild"),
+                    help="secondaire : loi de survie des sporanges (vpd : Blaeser & Weltzien ; vinemild : Blaise & Gessler)")
+    ap.add_argument("--pluie-detachement", type=float,
+                    help="secondaire : pluie horaire minimale (mm) pour détacher les sporanges (défaut : aucune condition)")
+    ap.add_argument("--productivite-min", type=float,
+                    help="secondaire : ne compter que les nuits où la productivité relative d'une tache reste >= ce seuil")
     ap.add_argument("--tol-sec", type=int,
                     help="secondaire : heures sèches tolérées au sein d'une période d'humectation (défaut 1)")
     ap.add_argument("--dh", choices=("base", "produit"),
@@ -806,6 +882,12 @@ def main(argv=None):
         sec["actif"] = False
     if a.vie_sporanges is not None:
         sec["survie"], sec["duree_vie_sporanges_h"] = "fixe", a.vie_sporanges
+    if a.survie:
+        sec["survie"] = a.survie
+    if a.pluie_detachement is not None:
+        sec["pluie_detachement_mm"] = a.pluie_detachement
+    if a.productivite_min is not None:
+        sec["productivite_min"] = a.productivite_min
     if a.tol_sec is not None:
         sec["tolerance_h"] = a.tol_sec
     if sec:
