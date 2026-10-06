@@ -9,6 +9,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | Fichier | Rôle |
 |---|---|
 | `mildiou_primaire.py` | le moteur (primaire **et secondaire**) + ses paramètres (`PARAMS`) + une ligne de commande (le nom du fichier sera changé quand le dépôt accueillera l'oïdium et le botrytis) |
+| `oidium.py` | moteur oïdium v0 : cycle par cohortes (latence, sporulation, conidies, infection) au pas horaire, calcul à rebours des dates d'infection, balayage des amorçages |
 | `historique_meteo.py` | historique météo horaire **local** (SQLite) : ne télécharge que les jours manquants, importe et exporte des CSV, compte les appels Open-Meteo |
 | `recuperer_meteo_horaire.py` | télécharge la météo horaire d'une position (Open-Meteo) → CSV (validé sur le VPS) |
 | `exporter_plasmopy.py` | convertit meteo.csv au format d'entrée de Plasmopy (témoin de comparaison) |
@@ -19,7 +20,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 218 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 264 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -71,6 +72,44 @@ au-delà ce sont des prévisions, restées corrigeables.
 300 000 par mois, par adresse IP ; usage **non commercial** uniquement ; attribution requise (CC BY 4.0). Plans commerciaux :
 Standard (1 million d'appels par mois, sans API historique) et Professional (5 millions, avec) ; prix annoncés par l'éditeur :
 29 et 99 dollars par mois, à confirmer à la souscription.
+
+## Moteur oïdium (`oidium.py`, v0)
+L'oïdium se développe dans des conditions météo assez larges et ne se rattache pas à des événements ponctuels (Dubuis et al. 2014) :
+le moteur simule donc la **dynamique de l'épidémie** par cohortes, et non des infections datées comme pour le mildiou.
+
+    infection -> LATENCE -> SPORULATION (symptômes visibles) -> conidies -> nouvelles infections -> ...
+
+* **Formalismes** : Garin (2011, mémoire ITK, HAL hal-01877240) d'après Calonnec et al. (2008), Chellemi et Marois (1991) et Caffi et al.
+  (2011). Fonction thermique bêta entre 5 et 31 °C (optimum ≈ 26 °C) ; latence = 6 j / F(T) (≈ 6 j à 25 °C, 11 j à 15 °C, bloquée au-delà
+  de 31 °C) ; fin de sporulation de ≈ 14 j (15 °C) à ≈ 4,5 j (30 °C) ; infection par les conidies selon T, l'âge de la feuille et l'humidité
+  de l'air (nulle sous ≈ 38 %, maximale dès 85 %), réduite par l'eau libre. **Deux valeurs imprimées dans le mémoire sont fautives**
+  (b = 0,762 pour la sporulation, lire 0,0762 ; a = 0,0023 pour l'humidité, lire 0,0213) : elles ont été rectifiées d'après ses figures,
+  et les durées de latence, de sporulation et le pic d'infection de la figure I sont retrouvés.
+* **Infection primaire** (simplifiée) : après le débourrement, pluie >= 2,5 mm sur 6 h avec T >= 10 °C (Gadoury et Pearson 1990) ;
+  25 % du stock d'ascospores restant est déchargé à chaque événement ; le stock initial dépend de la sévérité de l'oïdium de l'année
+  précédente (0 à 3, catégories du mémoire).
+* **Indice Oïdi (Modeline)** : le Comité Champagne publie dans le BSV un indice de risque de sortie d'hiver (modèle Oïdi de la société Modeline,
+  adapté du modèle SOV de l'IFV, qui s'appuie sur la météo des deux années précédentes) : tendance du potentiel épidémique de l'année, non
+  un modèle journalier. `--indice-oidi 95` l'utilise comme stock d'ascospores de départ (hypothèse v0 : stock = indice / 100, **à caler**) et
+  remplace `--severite`. Ses équations ne sont pas publiques.
+* **Pas dans la v0** : vent, ultraviolets, croissance de la vigne (surface foliaire constante), résistance ontogénique des grappes,
+  cléistothèces en détail, traitements (comme pour le mildiou, le moteur évalue le danger indépendamment des traitements).
+* **Unités relatives** : une capacité d'accueil fixe l'échelle ; seuls les rythmes et les dates ont un sens avant calage. Le mémoire est un
+  prototype **non validé** sur des observations de terrain.
+
+```bash
+python3 oidium.py meteo.csv --debourrement 2026-03-28 --retro 2026-07-20 2026-08-06 2026-09-03 --tolerance 4   # à rebours
+python3 oidium.py meteo.csv --debourrement 2026-03-28 --balayage 2026-04-05 2026-07-10    # générations simulées pour des amorçages successifs
+python3 oidium.py meteo.csv --debourrement 2026-03-28 --indice-oidi 95 --pas 7            # simulation complète (indice Oïdi 2026)
+```
+Le calcul **à rebours** ne dépend ni de l'inoculum ni des traitements : il utilise seulement l'horloge de la latence avec la météo réelle, puis
+indique si les jours d'infection ainsi reconstitués étaient réellement favorables. Le **rang** compare leur favorabilité à celle des jours du
+1er mai (ou du débourrement, s'il est plus tardif) au 30 septembre : inclure un mois d'avril froid flatterait n'importe quel jour un peu favorable.
+Le débourrement par défaut est le 15 avril : à préciser avec `--debourrement` (en 2026 : **28 mars**).
+
+**Vérité terrain 2026 (clients, Champagne, sous programme phytosanitaire)** : débourrement le **28 mars** ; indice Oïdi de sortie d'hiver **95/100** (« élevé », BSV n°1 du 7 avril 2026), mais projections d'ascospores très faibles et localisées observées au vignoble et 38 % des bourgeons détruits par le gel ; premiers symptômes d'oïdium vers le **20 juillet**, puis vers
+le **6 août**, puis explosion début **septembre**. Elle se juge sur le rappel (les périodes d'infection doivent être favorables), non sur
+les fausses alertes, la protection pouvant retarder ou masquer les symptômes.
 
 ## Infections secondaires (v0)
 **Vocabulaire : trois étapes à ne pas confondre.**

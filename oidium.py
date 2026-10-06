@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Moteur oïdium (Erysiphe necator) — v0 : cycle par cohortes, pas de temps horaire
+================================================================================
+
+Contrairement au mildiou, l'oïdium se développe dans des conditions météo assez larges et ne se rattache pas à des événements
+ponctuels (Dubuis et al. 2014). Le moteur simule donc la DYNAMIQUE de l'épidémie, cohorte par cohorte, plutôt que des
+infections datées :
+
+    infection → LATENCE → SPORULATION (symptômes visibles) → conidies → nouvelles infections → ...
+
+Formalismes : Garin (2011, mémoire ITK, HAL hal-01877240) d'après Calonnec et al. (2008), Chellemi et Marois (1991) et
+Caffi et al. (2011). Ce sont des formalismes de la littérature, NON calés sur la Champagne ; deux valeurs imprimées dans le
+mémoire sont manifestement fautives (décimale perdue, chiffres inversés) et ont été rectifiées d'après ses figures :
+
+  * fonction thermique F(T), type bêta, entre 5 et 31 °C (optimum ≈ 26 °C) : croissance, latence, sporulation, infection ;
+  * latence : 6 jours / F(T) (≈ 6 j à 25 °C, 11 j à 15 °C, bloquée au-delà de 31 °C) ;
+  * fin de sporulation : taux/jour = a·exp(b·T), a = 0,0227 et b = 0,0762 (imprimé 0,762) ;
+  * infection par les conidies : I0·F(T)·exp(−τ·âge de la feuille)·min(1, a·HR − b), a = 0,0213 (imprimé 0,0023), b = 0,8068 ;
+    réduite par l'eau libre (figure I du mémoire).
+
+Ce que le moteur ne fait PAS (v0) : vent, rayonnement UV, croissance de la vigne (surface foliaire constante), résistance
+ontogénique des grappes, conservation hivernale détaillée (cléistothèces), traitements phytosanitaires (le moteur évalue le
+danger indépendamment des traitements, comme celui du mildiou).
+
+Unités : les colonies sont en unités RELATIVES (une capacité d'accueil de la vigne fixe l'échelle). Seuls les rythmes et les dates
+ont un sens avant calage sur le terrain.
+
+Usage :
+    python3 oidium.py meteo.csv --debourrement 2026-04-15 [--severite 2] [--graine 2026-05-20]
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import sys
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import mildiou_primaire as mp
+
+UTC = timezone.utc
+
+PARAMS = {
+    "fuseau_local": "Europe/Paris",
+    # Fonction thermique F(T) : bêta normalisée entre tmin et tmax (Calonnec et al. 2008 ; Garin 2011, annexe III)
+    "temperature": {"tmin": 5.0, "tmax": 31.0, "m": 0.27, "n": 1.24},
+    "latence": {"jours_optimum": 6.0},
+    # Fin de sporulation : fraction d'achèvement par jour = a·exp(b·T)
+    "sporulation": {"a": 0.0227, "b": 0.0762},
+    "infection": {
+        "i0": 0.53,                      # taux maximal d'infection par les conidies
+        "tau": 0.147,                    # perte de sensibilité de la feuille avec l'âge (par jour)
+        "age_feuille_j": 3.0,            # âge moyen des feuilles réceptives (v0 : constant)
+        "hr_a": 0.0213, "hr_b": 0.8068,  # facteur d'humidité : min(1, a·HR − b) ; nul sous ≈ 38 %, maximal dès 85 %
+        "eau_libre": 0.8,                # facteur appliqué quand la feuille est mouillée (figure I : 0,27 / 0,34)
+    },
+    "humectation": {"seuil_capteur": 0.5, "pluie_mm": 0.2, "hr_pct": 90.0, "ecart_rosee_c": 1.0},
+    # Production et dispersion des conidies (relatif : à caler)
+    "conidies": {
+        "emission_par_colonie_jour": 30.0,   # conidies « équivalent-infection » par colonie sporulante et par jour à F(T) = 1
+        "depot_horaire": 0.05,               # part du stock de conidies qui se dépose chaque heure sur le feuillage
+        "perte_horaire": 0.03,               # viabilité perdue / emportées chaque heure
+    },
+    "primaire": {
+        "pluie_mm": 2.5, "pluie_heures": 6,  # déclencheur de décharge des ascospores (Gadoury et Pearson 1990 : 2,5 mm, 10 °C)
+        "temperature_min": 10.0,
+        "debourrement": None,                # date AAAA-MM-JJ ; défaut : 15 avril de l'année de la série
+        "fenetre_jours": 60,                 # durée pendant laquelle les ascospores peuvent encore infecter
+        "fraction_par_evenement": 0.25,      # part du stock d'ascospores déchargée à chaque événement
+        "colonies_par_evenement": 0.02,      # colonies créées par un événement, stock plein, F(T) = 1 (relatif)
+        # sévérité de l'oïdium l'année précédente (0 à 3, catégories du mémoire) -> stock d'ascospores relatif (80/320/680 par cm²)
+        "stock_selon_severite": {0: 0.0, 1: 0.12, 2: 0.47, 3: 1.0},
+        "severite_precedente": 2,
+        # Indice annuel de sortie d'hiver (0 à 100) du modèle Oïdi (Modeline, adapté du SOV) publié dans le BSV : s'il est donné, il remplace la
+        # sévérité de l'année précédente. Hypothèse v0, à caler : stock d'ascospores relatif = indice / 100.
+        "indice_oidi": None,
+    },
+    "capacite_colonies": 1000.0,             # colonies maximales avant saturation du feuillage (échelle relative)
+    "seuil_visible": 0.001,                  # fraction de la capacité sporulante à partir de laquelle des symptômes sont repérables
+    "infections_initiales": [],              # [{"t": "2026-05-20T00:00", "n": 1.0}] : amorçage manuel (tests, scénarios)
+}
+
+
+# ---------------------------------------------------------------------------
+# Fonctions biologiques
+# ---------------------------------------------------------------------------
+def f_temp(t: float | None, p: dict) -> float:
+    """Taux relatif (0 à 1) lié à la température, bêta normalisée ; nul hors de ]tmin ; tmax[."""
+    if t is None:
+        return 0.0
+    c = p["temperature"]
+    if t <= c["tmin"] or t >= c["tmax"]:
+        return 0.0
+    x = (t - c["tmin"]) / (c["tmax"] - c["tmin"])
+    m, n = c["m"], c["n"]
+    return ((m + n) ** (m + n)) / (n ** n * m ** m) * x ** n * (1 - x) ** m
+
+
+def duree_latence_j(t: float, p: dict) -> float:
+    """Durée de latence (jours) à température constante ; infinie si le développement est bloqué."""
+    f = f_temp(t, p)
+    return p["latence"]["jours_optimum"] / f if f > 1e-9 else math.inf
+
+
+def taux_fin_sporulation(t: float, p: dict) -> float:
+    """Fraction de la période de sporulation achevée par jour à la température t (3 à 20 jours selon la température)."""
+    s = p["sporulation"]
+    return s["a"] * math.exp(s["b"] * t)
+
+
+def facteur_humidite(hr: float | None, p: dict) -> float:
+    if hr is None:
+        return 0.5
+    i = p["infection"]
+    return max(0.0, min(1.0, i["hr_a"] * hr - i["hr_b"]))
+
+
+def potentiel_horaire(t: float, hr: float | None, mouille: bool, p: dict) -> float:
+    """Favorabilité de l'heure à l'épidémie, 0 à 1 : température × humidité de l'air, réduite par l'eau libre."""
+    return f_temp(t, p) * facteur_humidite(hr, p) * (p["infection"]["eau_libre"] if mouille else 1.0)
+
+
+def probabilite_infection(t: float, hr: float | None, mouille: bool, p: dict) -> float:
+    i = p["infection"]
+    return i["i0"] * math.exp(-i["tau"] * i["age_feuille_j"]) * potentiel_horaire(t, hr, mouille, p)
+
+
+# ---------------------------------------------------------------------------
+# Simulation
+# ---------------------------------------------------------------------------
+class Cohorte:
+    __slots__ = ("id", "source", "gen", "t_inf", "n", "lat", "spo", "etat", "t_symp", "t_fin")
+
+    def __init__(self, id_, source, gen, t_inf, n):
+        self.id, self.source, self.gen, self.t_inf, self.n = id_, source, gen, t_inf, n
+        self.lat, self.spo, self.etat, self.t_symp, self.t_fin = 0.0, 0.0, "latente", None, None
+
+
+def _instant(s: str) -> datetime:
+    t = datetime.fromisoformat(s.strip().replace("Z", ""))
+    return t.replace(tzinfo=UTC) if t.tzinfo is None else t.astimezone(UTC)
+
+
+def _iso(t: datetime | None):
+    return t.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ") if t else None
+
+
+def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime | None = None) -> dict:
+    """
+    rows   : série horaire [{t (UTC), temp, hr, pluie, rosee?, mouille?}, ...] (mêmes lignes que le moteur du mildiou)
+    params : surcharges de PARAMS
+    now    : instant de référence : les jours postérieurs sont marqués « previsionnel »
+    """
+    p = mp.fusionner(PARAMS, params)
+    tz = ZoneInfo(p["fuseau_local"])
+    now = now or datetime.now(UTC)
+    rows, avert = mp.preparer(rows)
+    if not rows:
+        raise ValueError("série météo vide")
+
+    pp, pc, pi_ = p["primaire"], p["conidies"], p["infection"]
+    annee = rows[0]["t"].astimezone(tz).year
+    debourrement = (date.fromisoformat(pp["debourrement"]) if pp["debourrement"] else date(annee, 4, 15))
+    fin_primaire = debourrement + timedelta(days=pp["fenetre_jours"])
+    stock_asc = pp["stock_selon_severite"].get(pp["severite_precedente"], pp["stock_selon_severite"].get(str(pp["severite_precedente"]), 0.0))
+    if pp.get("indice_oidi") is not None:
+        stock_asc = max(0.0, min(100.0, float(pp["indice_oidi"]))) / 100.0
+    stock_asc0 = stock_asc
+    capacite = p["capacite_colonies"]
+    seuil_vis = p["seuil_visible"] * capacite
+    ph = {"humectation": p["humectation"]}
+
+    # pluie sur les k dernières heures
+    k = max(1, int(pp["pluie_heures"]))
+    pluie6, fen = [], []
+    for r in rows:
+        fen.append(r["pluie"] or 0.0)
+        if len(fen) > k:
+            fen.pop(0)
+        pluie6.append(sum(fen))
+
+    seeds = sorted(({"t": _instant(s["t"]), "n": float(s["n"])} for s in p["infections_initiales"]), key=lambda s: s["t"])
+    seed_i = 0
+
+    actives, toutes = [], []
+    pool, d_total, prochain_id = 0.0, 0.0, 1
+    primaires, jours, jalons = [], {}, {}
+    dernier_primaire = None
+
+    def jour_local(t):
+        return t.astimezone(tz).date()
+
+    def creer(source, gen, t, n):
+        nonlocal prochain_id, d_total
+        c = Cohorte(prochain_id, source, gen, t, n)
+        prochain_id += 1
+        actives.append(c)
+        toutes.append(c)
+        d_total += n
+        return c
+
+    for i, r in enumerate(rows):
+        t, T, hr = r["t"], r["temp"], r.get("hr")
+        j = jour_local(t)
+        mouille = mp.est_mouille(r, ph)
+        f = f_temp(T, p)
+        d = jours.setdefault(j, {"temps": [], "hr": [], "pluie": 0.0, "potentiel": [], "lat_vitesse": 0.0, "nouvelles": 0.0})
+        d["temps"].append(T)
+        if hr is not None:
+            d["hr"].append(hr)
+        d["pluie"] += r["pluie"] or 0.0
+        d["potentiel"].append(potentiel_horaire(T, hr, mouille, p))
+        d["lat_vitesse"] += f / (p["latence"]["jours_optimum"] * 24.0)
+
+        # --- amorçages manuels ---
+        while seed_i < len(seeds) and seeds[seed_i]["t"] <= t:
+            creer("initiale", 0, seeds[seed_i]["t"], seeds[seed_i]["n"])
+            seed_i += 1
+
+        # --- infection primaire : décharge d'ascospores déclenchée par la pluie, après le débourrement ---
+        if (debourrement <= j <= fin_primaire and stock_asc > 1e-9 and pluie6[i] >= pp["pluie_mm"]
+                and T is not None and T >= pp["temperature_min"] and 0.0 < f and dernier_primaire != j):
+            q = stock_asc * pp["fraction_par_evenement"]
+            stock_asc -= q
+            n = pp["colonies_par_evenement"] * q * f          # q est en unités de stock (1,0 = stock plein) : la sévérité l'échelonne
+            if n > 1e-12:
+                c = creer("primaire", 0, t, n)
+                primaires.append({"t": _iso(t), "colonies": round(n, 6), "pluie_mm": round(pluie6[i], 1), "temperature": T})
+                dernier_primaire = j
+
+        # --- développement des cohortes : latence puis sporulation ---
+        emission = 0.0
+        dom, dom_n = None, 0.0
+        for c in actives:
+            if c.etat == "latente":
+                c.lat += f / (p["latence"]["jours_optimum"] * 24.0)
+                if c.lat >= 1.0:
+                    c.etat, c.t_symp = "sporulante", t
+            elif c.etat == "sporulante":
+                c.spo += taux_fin_sporulation(T, p) / 24.0
+                if c.spo >= 1.0:
+                    c.etat, c.t_fin = "terminee", t
+            if c.etat == "sporulante":
+                emission += c.n * f * pc["emission_par_colonie_jour"] / 24.0
+                if c.n > dom_n:
+                    dom, dom_n = c, c.n
+        if any(c.etat == "terminee" for c in actives):
+            actives = [c for c in actives if c.etat != "terminee"]
+
+        # --- conidies : émission, dépôt, infection de tissu sain ---
+        pool += emission
+        deposees = pool * pc["depot_horaire"]
+        pool -= deposees + pool * pc["perte_horaire"]
+        sain = max(0.0, 1.0 - d_total / capacite)
+        nouvelles = deposees * probabilite_infection(T, hr, mouille, p) * sain if T is not None else 0.0
+        if nouvelles > 1e-12:
+            creer("secondaire", (dom.gen + 1) if dom else 1, t, nouvelles)
+            d["nouvelles"] += nouvelles
+
+        d["sporulantes"] = sum(c.n for c in actives if c.etat == "sporulante")
+        d["fraction"] = d_total / capacite
+        for seuil, cle in ((0.01, "fraction_1_pct"), (0.10, "fraction_10_pct"), (0.50, "fraction_50_pct")):
+            if cle not in jalons and d["fraction"] >= seuil:
+                jalons[cle] = j.isoformat()
+        if "premiers_symptomes_visibles" not in jalons and d["sporulantes"] >= seuil_vis:
+            jalons["premiers_symptomes_visibles"] = j.isoformat()
+
+    # --- sorties ---
+    ref = now.astimezone(tz).date()
+    sortie_jours = []
+    for j in sorted(jours):
+        d = jours[j]
+        lat_eq = (1.0 / d["lat_vitesse"]) if d["lat_vitesse"] > 1e-9 else None
+        sortie_jours.append({
+            "date": j.isoformat(), "tmoy": round(sum(d["temps"]) / len(d["temps"]), 1),
+            "hr_moy": round(sum(d["hr"]) / len(d["hr"]), 0) if d["hr"] else None, "pluie_mm": round(d["pluie"], 1),
+            "potentiel_pct": round(100.0 * sum(d["potentiel"]) / len(d["potentiel"]), 1),
+            "latence_equivalente_j": round(min(lat_eq, 99.0), 1) if lat_eq else None,
+            "nouvelles_colonies": round(d["nouvelles"], 6), "colonies_sporulantes": round(d["sporulantes"], 4),
+            "fraction_malade": round(d["fraction"], 6), "previsionnel": j > ref})
+
+    gens = {}
+    for c in toutes:
+        if c.t_symp:
+            gens.setdefault(c.gen, []).append(c)
+    generations = []
+    for g in sorted(gens):
+        cs = sorted(gens[g], key=lambda c: c.t_symp)
+        total = sum(c.n for c in cs)
+        cumul, mediane = 0.0, cs[-1].t_symp
+        for c in cs:
+            cumul += c.n
+            if cumul >= total / 2.0:
+                mediane = c.t_symp
+                break
+        generations.append({"generation": g, "premiers_symptomes": _iso(cs[0].t_symp)[:10], "mediane": _iso(mediane)[:10],
+                            "cohortes": len(cs), "colonies": round(total, 4)})
+
+    # moyenne glissante de 7 jours du potentiel (présentation à la manière de VitiMeteo-Oidium)
+    pots = [d["potentiel_pct"] for d in sortie_jours]
+    for i_, d in enumerate(sortie_jours):
+        fen7 = pots[max(0, i_ - 6): i_ + 1]
+        d["indice_7j"] = round(sum(fen7) / len(fen7), 1)
+
+    return {"parametres": p, "avertissements": avert, "debourrement": debourrement.isoformat(),
+            "stock_ascospores_initial": stock_asc0, "primaires": primaires, "jalons": jalons, "generations": generations,
+            "jours": sortie_jours,
+            "cohortes": [{"id": c.id, "source": c.source, "generation": c.gen, "infection": _iso(c.t_inf), "colonies": round(c.n, 8),
+                          "symptomes": _iso(c.t_symp), "fin_sporulation": _iso(c.t_fin)} for c in toutes]}
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics qui n'exigent ni inoculum ni calage : horloge de la latence, balayage des amorçages
+# ---------------------------------------------------------------------------
+def retro_symptomes(rows: list[dict], params: dict | None = None) -> dict:
+    """Pour chaque jour local, date de sortie des symptômes d'une infection survenue ce jour-là : la latence avance chaque heure de
+    F(T)/(6 j × 24 h) jusqu'à 1. Ne dépend que de la température (ni inoculum, ni traitements) ; None si la série finit avant."""
+    from bisect import bisect_left
+    p = mp.fusionner(PARAMS, params)
+    tz = ZoneInfo(p["fuseau_local"])
+    rows, _ = mp.preparer(rows)
+    L = p["latence"]["jours_optimum"] * 24.0
+    S = [0.0]
+    for r in rows:
+        S.append(S[-1] + f_temp(r["temp"], p) / L)
+    par_jour = {}
+    for i, r in enumerate(rows):
+        j = bisect_left(S, S[i] + 1.0, lo=i + 1)
+        sortie = rows[j - 1]["t"].astimezone(tz).date() if j <= len(rows) else None
+        par_jour.setdefault(r["t"].astimezone(tz).date(), []).append(sortie)
+    out = {}
+    for jour, sorties in par_jour.items():
+        valides = sorted(s for s in sorties if s)
+        out[jour] = valides[len(valides) // 2] if len(valides) == len(sorties) and valides else None   # médiane des 24 heures
+    return out
+
+
+def fenetre_infection(retro: dict, observation: date, tolerance_j: int = 3) -> list[date]:
+    """Jours d'infection dont les symptômes sortiraient à ± tolerance_j de la date observée."""
+    return sorted(j for j, s in retro.items() if s and abs((s - observation).days) <= tolerance_j)
+
+
+def analyse_retro(rows: list[dict], observations: list[date], params: dict | None = None, tolerance_j: int = 3) -> list[dict]:
+    """Pour chaque date d'observation de symptômes : fenêtre d'infection correspondante, latence, favorabilité de ces jours et rang dans la saison."""
+    p = mp.fusionner(PARAMS, params)
+    res = calculer_saison(rows, {**(params or {}), "primaire": {**(params or {}).get("primaire", {}), "severite_precedente": 0}})
+    retro = retro_symptomes(rows, params)
+    pot = {date.fromisoformat(d["date"]): d["potentiel_pct"] for d in res["jours"]}
+    # Période de référence du rang : du 1er mai (ou du débourrement s'il est plus tardif) au 30 septembre. Inclure un mois d'avril froid
+    # flatterait n'importe quel jour un peu favorable.
+    debourrement = date.fromisoformat(res["debourrement"])
+    ref_debut, ref_fin = max(debourrement, date(debourrement.year, 5, 1)), date(debourrement.year, 9, 30)
+    saison = sorted(v for j, v in pot.items() if ref_debut <= j <= ref_fin)
+    sortie = []
+    for obs in observations:
+        jours = fenetre_infection(retro, obs, tolerance_j)
+        if not jours:
+            sortie.append({"observation": obs.isoformat(), "infections": None})
+            continue
+        moyenne = sum(pot[j] for j in jours if j in pot) / len([j for j in jours if j in pot])
+        rang = 100.0 * sum(1 for v in saison if v < moyenne) / len(saison) if saison else None
+        lats = [(retro[j] - j).days for j in jours]
+        sortie.append({"observation": obs.isoformat(), "infections": [jours[0].isoformat(), jours[-1].isoformat()],
+                       "latence_j": [min(lats), max(lats)], "potentiel_moyen_pct": round(moyenne, 1),
+                       "rang_saison_pct": round(rang, 0) if rang is not None else None,
+                       "periode_reference": [ref_debut.isoformat(), ref_fin.isoformat()],
+                       "meilleur_jour": max(jours, key=lambda j: pot.get(j, -1)).isoformat()})
+    return sortie
+
+
+def balayage_graines(rows: list[dict], debut: date, fin: date, pas_j: int = 7, params: dict | None = None) -> list[dict]:
+    """Pour chaque date d'amorçage entre debut et fin : dates de sortie des 3 premières générations et du seuil de visibilité."""
+    sortie, j = [], debut
+    while j <= fin:
+        surcharge = {**(params or {}), "infections_initiales": [{"t": j.isoformat() + "T12:00", "n": 1.0}],
+                     "primaire": {**(params or {}).get("primaire", {}), "severite_precedente": 0}}
+        res = calculer_saison(rows, surcharge)
+        g = {x["generation"]: x["premiers_symptomes"] for x in res["generations"]}
+        sortie.append({"graine": j.isoformat(), "G0": g.get(0), "G1": g.get(1), "G2": g.get(2), "G3": g.get(3),
+                       "visible": res["jalons"].get("premiers_symptomes_visibles"), "dix_pct": res["jalons"].get("fraction_10_pct")})
+        j += timedelta(days=pas_j)
+    return sortie
+
+
+# ---------------------------------------------------------------------------
+# Lecture humaine et ligne de commande
+# ---------------------------------------------------------------------------
+def resume(res: dict, pas_j: int = 7) -> str:
+    L = [f"OÏDIUM — cycle par cohortes (v0, formalismes de la littérature, non calé)",
+         f"  débourrement : {res['debourrement']} | stock d'ascospores relatif : {res['stock_ascospores_initial']}",
+         f"  infections primaires : {len(res['primaires'])}"]
+    for e in res["primaires"][:6]:
+        L.append(f"    {e['t']}  pluie {e['pluie_mm']} mm  T {e['temperature']} °C  -> {e['colonies']} colonie(s)")
+    L.append("\nJALONS")
+    noms = {"premiers_symptomes_visibles": "premiers symptômes repérables", "fraction_1_pct": "1 % du feuillage atteint",
+            "fraction_10_pct": "10 % du feuillage atteint", "fraction_50_pct": "50 % du feuillage atteint"}
+    for k, v in noms.items():
+        L.append(f"  {v:<34}: {res['jalons'].get(k, 'jamais')}")
+    L.append("\nGÉNÉRATIONS (dates de sortie des symptômes ; 0 = infections primaires)")
+    for g in res["generations"][:8]:
+        L.append(f"  G{g['generation']}  premiers {g['premiers_symptomes']}  médiane {g['mediane']}  ({g['cohortes']} cohortes)")
+    L.append(f"\nÉVOLUTION (un point tous les {pas_j} jours)")
+    L.append("  date        T moy  potentiel  indice 7 j  latence éq.  sporulantes  feuillage atteint")
+    for d in res["jours"][::pas_j]:
+        lat = f"{d['latence_equivalente_j']:>5.1f} j" if d["latence_equivalente_j"] is not None else "  bloquée"
+        L.append(f"  {d['date']}  {d['tmoy']:>5.1f}  {d['potentiel_pct']:>7.1f} %  {d['indice_7j']:>8.1f} %  {lat}   "
+                 f"{d['colonies_sporulantes']:>10.3f}   {100 * d['fraction_malade']:>9.4f} %")
+    return "\n".join(L)
+
+
+def resume_retro(analyses: list[dict], tolerance: int) -> str:
+    L = ["À REBOURS : quelles infections expliquent les symptômes observés ?",
+         "  (latence calculée avec la météo réelle ; ne dépend ni de l'inoculum ni des traitements)", ""]
+    for a in analyses:
+        if not a["infections"]:
+            L.append(f"  symptômes le {a['observation']} : aucune infection de la série n'y conduit")
+            continue
+        L.append(f"  symptômes le {a['observation']} (± {tolerance} j)")
+        L.append(f"    infections correspondantes : du {a['infections'][0]} au {a['infections'][1]}  (latence {a['latence_j'][0]} à {a['latence_j'][1]} j)")
+        rang = (f"meilleure que {a['rang_saison_pct']:.0f} % des jours du {a['periode_reference'][0][5:]} au {a['periode_reference'][1][5:]}"
+                if a["rang_saison_pct"] is not None else "rang indisponible (aucun jour de référence dans la série)")
+        L.append(f"    favorabilité moyenne de ces jours : {a['potentiel_moyen_pct']} %  -> {rang} ; jour le plus favorable : {a['meilleur_jour']}")
+    return "\n".join(L)
+
+
+def resume_balayage(lignes: list[dict]) -> str:
+    L = ["BALAYAGE DES AMORÇAGES (une infection initiale à midi à chaque date ; dates de sortie des symptômes par génération)", "",
+         "  amorçage      G0          G1          G2          G3          symptômes repérables   10 % du feuillage"]
+    for x in lignes:
+        L.append(f"  {x['graine']}  {x['G0'] or '-':<10}  {x['G1'] or '-':<10}  {x['G2'] or '-':<10}  {x['G3'] or '-':<10}  "
+                 f"{x['visible'] or '-':<21}  {x['dix_pct'] or '-'}")
+    return "\n".join(L)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Moteur oïdium (cycle par cohortes, v0)")
+    ap.add_argument("csv")
+    ap.add_argument("--debourrement", help="date de débourrement AAAA-MM-JJ (défaut : 15 avril)")
+    ap.add_argument("--severite", type=int, choices=(0, 1, 2, 3), help="sévérité de l'oïdium l'année précédente (0 à 3)")
+    ap.add_argument("--indice-oidi", type=float, help="indice de sortie d'hiver 0 à 100 du modèle Oïdi (BSV) ; remplace --severite")
+    ap.add_argument("--graine", action="append", default=[], help="amorçage manuel : AAAA-MM-JJ[THH:MM] (répétable)")
+    ap.add_argument("--multiplication", type=float, help="émission de conidies par colonie et par jour (calage)")
+    ap.add_argument("--fenetre", type=int, help="durée (jours) pendant laquelle les ascospores peuvent infecter après le débourrement (défaut 60)")
+    ap.add_argument("--pas", type=int, default=7, help="un point d'affichage tous les N jours")
+    ap.add_argument("--retro", nargs="+", metavar="DATE", help="dates observées de symptômes (AAAA-MM-JJ) : remonte aux jours d'infection")
+    ap.add_argument("--tolerance", type=int, default=3, help="tolérance de la date observée, en jours (défaut 3)")
+    ap.add_argument("--balayage", nargs=2, metavar=("DEBUT", "FIN"), help="amorçages successifs entre deux dates : générations simulées")
+    a = ap.parse_args(argv)
+    surcharge = {"primaire": {}, "conidies": {}}
+    if a.debourrement:
+        surcharge["primaire"]["debourrement"] = a.debourrement
+    if a.indice_oidi is not None:
+        surcharge["primaire"]["indice_oidi"] = a.indice_oidi
+    if a.fenetre:
+        surcharge["primaire"]["fenetre_jours"] = a.fenetre
+    if a.severite is not None:
+        surcharge["primaire"]["severite_precedente"] = a.severite
+    if a.multiplication:
+        surcharge["conidies"]["emission_par_colonie_jour"] = a.multiplication
+    if a.graine:
+        surcharge["infections_initiales"] = [{"t": g if "T" in g else g + "T00:00", "n": 1.0} for g in a.graine]
+    rows = mp.charger_csv(a.csv)
+    if a.retro:
+        print(resume_retro(analyse_retro(rows, [date.fromisoformat(x) for x in a.retro], surcharge, a.tolerance), a.tolerance))
+        return
+    if a.balayage:
+        print(resume_balayage(balayage_graines(rows, date.fromisoformat(a.balayage[0]), date.fromisoformat(a.balayage[1]), 7, surcharge)))
+        return
+    print(resume(calculer_saison(rows, surcharge), a.pas))
+
+
+if __name__ == "__main__":
+    main()
