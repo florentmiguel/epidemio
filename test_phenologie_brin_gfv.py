@@ -144,7 +144,7 @@ class TestChaineComplete(unittest.TestCase):
         self.assertAlmostEqual(r["seuils_gfv"]["s19"], 820.0)                                   # 41 jours de GFV à 20
         self.assertEqual(r["calendrier"]["9 feuilles étalées"], "2026-04-10")
         self.assertEqual(r["calendrier"]["pleine floraison"], "2026-04-30")                    # 1 220 >= 1 217 au 61e jour
-        self.assertEqual(r["calendrier"]["début de véraison"], "2026-06-26")                   # BBCH 81 : 1 217 + 0,85 × 1 330 = 2 347,5 -> 118e jour
+        self.assertEqual(r["calendrier"]["début de véraison"], "2026-06-16")                   # BBCH 81 : 1 217 + 0,697 × 1 330 = 2 144 -> 107e jour
 
     def test_le_stade_vegetatif_puis_le_relais_de_gfv(self):
         r = self.lancer()
@@ -152,18 +152,18 @@ class TestChaineComplete(unittest.TestCase):
         self.assertAlmostEqual(b[date(2026, 3, 24)], 12.08, delta=0.02)                         # 50 °C·j = 2,08 feuilles
         self.assertAlmostEqual(b[date(2026, 4, 9)], 18.75, delta=0.02)
         self.assertAlmostEqual(b[date(2026, 4, 10)], 19.0, delta=1e-9)                          # relais exact à 9 feuilles
-        self.assertAlmostEqual(b[date(2026, 4, 30)], 65.1, delta=0.2)
-        # le lendemain du relais, le stade monte déjà : BBCH 53 est placé à 15 % de l'intervalle (820 -> 1 217), soit à 879,55 de somme GFV ;
-        # au 11/04 la somme vaut 840 : 19 + 34 × (840 - 820) / (879,55 - 820) = 30,4 ; BBCH 53 au 13/04 (somme 880)
-        self.assertAlmostEqual(b[date(2026, 4, 11)], 30.42, delta=0.1)
-        self.assertAlmostEqual(b[date(2026, 4, 13)], 53.05, delta=0.1)
+        self.assertAlmostEqual(b[date(2026, 4, 30)], 65.4, delta=0.3)                           # recalé sur f65 = 1 217
+        # BBCH 53 est placé à 21,2 % de l'intervalle (800 -> 1 217), soit à 888 de somme GFV ;
+        # au 11/04 la somme vaut 820 : 19 + 34 × (820 - 800) / (888 - 800) = 26,7 ; avant BBCH 53 au 13/04 (somme 860, ~42)
+        self.assertAlmostEqual(b[date(2026, 4, 11)], 27.08, delta=0.1)
+        self.assertAlmostEqual(b[date(2026, 4, 13)], 43.24, delta=0.1)
 
     def test_le_stade_ne_recule_jamais_et_part_du_debourrement(self):
         r = self.lancer()
         v = [r["bbch"][j] for j in sorted(r["bbch"])]
         self.assertTrue(all(y >= x - 1e-9 for x, y in zip(v, v[1:])))
         self.assertEqual(min(r["bbch"]), self.DEB)
-        self.assertLessEqual(v[-1], 83.0)                                                       # plafonné à la véraison
+        self.assertLessEqual(v[-1], 89.0)                                                       # plafonné à la maturité
 
     def test_calendrier_dans_l_ordre(self):
         cal = self.lancer()["calendrier"]

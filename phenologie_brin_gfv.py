@@ -52,8 +52,13 @@ PARAMS = {
     "gfv": {"t_base": 0.0, "debut_mois": 3, "debut_jour": 1, "f_star": 1217.0, "v_star": 2547.0},
     "ecart_minimal_floraison": 50.0,       # somme GFV minimale entre « 9 feuilles » et la floraison (garde-fou)
     # position des stades intermédiaires dans l'intervalle (19 -> 65) puis (65 -> 83), en fraction : approximations
-    "fractions_avant_floraison": {53: 0.15, 57: 0.475, 61: 0.75},
-    "fractions_apres_floraison": {71: 0.12, 75: 0.37, 77: 0.50, 79: 0.65, 81: 0.85},
+    # Fractions de l'intervalle 19 -> 65 (avant floraison) et 65 -> 89 (après) : recalculées sur
+    # les stades BSV 2026 Champagne (sommes GFV exactes). Les stades 57, 61 (avant floraison) et 83
+    # (entre véraison et maturité, non directement observés) gardent leurs positions approchées.
+    "fractions_avant_floraison": {53: 0.212, 57: 0.475, 61: 0.75},
+    # Après floraison : fractions BEAUCOUP plus tassées qu'une distribution linéaire ; la nouaison (71)
+    # arrive très vite après la floraison (3 % de l'intervalle), et la fermeture (79) à mi-chemin (48 %).
+    "fractions_apres_floraison": {71: 0.033, 75: 0.166, 77: 0.276, 79: 0.477, 81: 0.697, 83: 0.779, 85: 0.861},
 }
 
 

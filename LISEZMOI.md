@@ -23,7 +23,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 433 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 434 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -181,6 +181,12 @@ sur des stades observés. Avec `--calendrier`, la sortie affiche d'abord le **bi
 python3 oidium.py meteo6.csv --debourrement 2026-03-28 --calendrier --stades stades_bsv_2026.csv
 python3 oidium.py meteo6.csv --phenologie brin_gfv --debourrement 2026-03-28 --stades stades_bsv_2026.csv --indice-oidi 95
 ```
+**Fractions des stades intermédiaires** recalculées sur les 17 stades BSV 2026 :
+les stades post-floraison arrivent beaucoup plus vite après la floraison que ce que supposait une distribution linéaire : la nouaison (BBCH 71) à 3 % de
+l'intervalle floraison-maturité, la fermeture de la grappe (BBCH 79) à 48 %, le début de véraison (BBCH 81) à 70 %. Ces valeurs corrigent un décalage de
+~10 jours observé sur la fermeture de la grappe en 2025 (observée le 13 juillet vs modèle à 24 juillet avec les anciennes fractions). Elles ne proviennent
+que de la saison 2026 et resteront à consolider sur d'autres années.
+
 **Résultat 2026** (17 stades du BSV ; températures reconstituées à partir d'un point par semaine : approximatif, à refaire sur le CSV complet) :
 * les deux modèles par défaut sont **en retard** sur les stades observés : table DJC de 8,8 jours en moyenne, BRIN + GFV de 12,1 jours, surtout pour les
   feuilles (jusqu'à 20 jours) et de la floraison aux grains de pois (13 à 17 jours) ; ils rattrapent à la véraison (3 à 5 jours) ;

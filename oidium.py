@@ -232,9 +232,13 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
         raise ValueError("série météo vide")
 
     pp, pc, pi_ = p["primaire"], p["conidies"], p["infection"]
-    annee = rows[-1]["t"].astimezone(tz).year
+    # Année de la saison : celle du débourrement fourni s'il l'est, sinon la dernière ligne de la série.
+    # Utiliser rows[-1] quand la série couvre deux années (ex. archive 2025 + 2026) donnerait l'année suivante,
+    # ce qui décalerait la somme GFV et rendrait les stades observés de la saison voulue introuvables.
+    annee_serie = rows[-1]["t"].astimezone(tz).year
+    annee_debourrement = int(pp["debourrement"][:4]) if pp.get("debourrement") else None
+    annee = annee_debourrement or annee_serie
     pf = p["phenologie"]
-    # BRIN + GFV : le débourrement est ESTIMÉ s'il n'est pas fourni ; il sert alors aussi à la fenêtre des infections primaires
     res_bg = None
     if pf["modele"] == "brin_gfv" and pf["actif"] is not False:
         res_bg = pbg.serie_bbch_brin_gfv(rows, tz, annee, pf["brin_gfv"],
