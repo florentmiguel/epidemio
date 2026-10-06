@@ -95,6 +95,14 @@ le moteur simule donc la **dynamique de l'épidémie** par cohortes, et non des 
   adapté du modèle SOV de l'IFV, qui s'appuie sur la météo des deux années précédentes) : tendance du potentiel épidémique de l'année, non
   un modèle journalier. `--indice-oidi 95` l'utilise comme stock d'ascospores de départ (hypothèse v0 : stock = indice / 100, **à caler**) et
   remplace `--severite`. Ses équations ne sont pas publiques.
+* **Mortalité thermique** (Peduto et al. 2013 ; Delp 1954) : à partir de 36-38 °C, colonies et conidies perdent de la biomasse/viabilité à un
+  taux horaire croissant avec la température (courbe puissance). Une décote de 3 °C est appliquée (microclimat intérieur plus frais que l'air).
+  La mortalité est toujours **partielle** : plafonnée à 15 %/h pour les colonies, 25 %/h pour les conidies. À 44 °C, une colonie perd > 75 % de sa
+  biomasse en 24 h ; à 40 °C (T_eff = 37 °C), environ 38 % en 5 jours.
+* **Chasmothèces** (Legler 2012 ; Gadoury et Pearson 1987) : formation initiée après un cumul de 8 h sous 13 °C, puis intégrée en continu.
+  Favorabilité thermique de formation : courbe bêta entre 10 et 30 °C, optimum 22 °C. Production proportionnelle à la surface malade.
+  **Indice de fin de saison** (0 à 1) : peut être passé comme `--indice-oidi` de l'année suivante, ce qui ferme la boucle pluriannuelle.
+  Le lien quantitatif entre l'intégrale et le nombre réel de chasmothèces par cm² n'est pas calé : seul l'ordre de grandeur a un sens.
 * **Pas dans le moteur** : cléistothèces en détail, effet du gel sur le feuillage (paramètre `phenologie.surface_foliaire_max`),
   traitements (comme pour le mildiou, le moteur évalue le danger indépendamment des traitements).
 * **Unités relatives** : une capacité d'accueil fixe l'échelle ; seuls les rythmes et les dates ont un sens avant calage. Le mémoire est un

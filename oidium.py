@@ -107,7 +107,29 @@ PARAMS = {
         "rayonnement_reference_wm2": 800.0,     # plein soleil
         "part_exposee": 0.5,                    # fraction du feuillage directement exposée (le reste est à l'ombre)
         "mortalite_horaire": 0.12,              # part des conidies tuées chaque heure à pleine exposition (sur la fraction exposée)
-        "reduction_infection": 0.6,              # réduction de l'infection et de la favorabilité à pleine exposition (sur la fraction exposée)
+        "reduction_infection": 0.6,             # réduction de l'infection et de la favorabilité à pleine exposition (sur la fraction exposée)
+    },
+    # Mortalité thermique (Peduto et al. 2013 ; Delp 1954). Effets létaux à partir de 36-38 °C, temps-dépendants.
+    # Le microclimat intérieur est 3-5 °C plus frais que l'air : on applique un décote de 3 °C sur la temperature mesurée.
+    # Conidies (moins tolérantes) : courbe plus agressive que pour les colonies.
+    # La mortalité n'est jamais totale : on plafonne à max_mortalite par heure.
+    "chaleur": {
+        "actif": True,
+        "decote_microclimat_c": 3.0,           # température ressentie par le champignon = T_air - décote
+        # Courbe de mortalite HORAIRE des colonies existantes : max(0, a × (T_eff − seuil)^b) si T_eff > seuil
+        "colonies": {"seuil_c": 36.0, "a": 0.004, "b": 1.8, "max_par_heure": 0.15},
+        # Conidies (pool et stock sur colonies) : plus sensibles, seuil légèrement plus bas
+        "conidies": {"seuil_c": 34.0, "a": 0.006, "b": 1.8, "max_par_heure": 0.25},
+    },
+    # Chasmothèces : formation proportionnelle à la surface malade × favorabilité thermique (Legler 2012 : optimum 20 °C)
+    # L'indice relatif de fin de saison devient le stock d'ascospores de l'année suivante (0 à 1).
+    "chasmotheces": {
+        "actif": True,
+        "seuil_heures_froid": 8,               # cumul d'heures sous 13 °C déclenchant l'initiation (Gadoury et Pearson 1987)
+        "temperature_seuil_froid_c": 13.0,
+        "t_opt": 20.0, "t_min": 10.0, "t_max": 30.0,   # courbe bêta de Legler 2012
+        "m_beta": 0.6, "n_beta": 0.9,
+        "surface_poids": 1.0,                  # poids de la surface malade dans l'intégrale (à caler)
     },
     # Phénologie et résistance ontogénique : voir phenologie.py
     "phenologie": {
@@ -158,6 +180,28 @@ def facteur_humidite(hr: float | None, p: dict) -> float:
         return 0.5
     i = p["infection"]
     return max(0.0, min(1.0, i["hr_a"] * hr - i["hr_b"]))
+
+
+def taux_mortalite_thermique(t_air: float | None, config: dict, decote: float) -> float:
+    """Taux de mortalite horaire (0 à max_par_heure) pour colonies ou conidies selon leur config, après décote microclimat."""
+    if t_air is None:
+        return 0.0
+    t_eff = t_air - decote
+    if t_eff <= config["seuil_c"]:
+        return 0.0
+    return min(config["max_par_heure"], config["a"] * (t_eff - config["seuil_c"]) ** config["b"])
+
+
+def taux_chasmotheces(t: float | None, p: dict) -> float:
+    """Favorabilité thermique de formation des chasmothèces : bêta entre t_min et t_max (Legler 2012, optimum 20 °C)."""
+    if t is None:
+        return 0.0
+    pc = p["chasmotheces"]
+    tmin, tmax, m, n = pc["t_min"], pc["t_max"], pc["m_beta"], pc["n_beta"]
+    if t <= tmin or t >= tmax:
+        return 0.0
+    x = (t - tmin) / (tmax - tmin)
+    return ((m + n) ** (m + n)) / (n ** n * m ** m) * x ** n * (1 - x) ** m
 
 
 def taux_dispersion(vitesse: float, p: dict) -> float:
@@ -298,6 +342,7 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
 
     actives, toutes = [], []
     pool, stock_col, d_total, prochain_id = 0.0, 0.0, 0.0, 1
+    integral_chasmotheces, heures_froid, initiation_chasmotheces = 0.0, 0, False
     primaires, jours, jalons = [], {}, {}
     dernier_primaire = None
 
@@ -331,6 +376,14 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
             cap_t, sf, sb = capacite, 1.0, None
         expo = exposition_uv(r.get("rayonnement"), p) if uv_actif else 0.0
         uv_mort = pu["mortalite_horaire"] * expo
+        # mortalité thermique (colonies et conidies séparément)
+        pch = p["chaleur"]
+        if pch["actif"] and T is not None:
+            decote = pch["decote_microclimat_c"]
+            mort_col = taux_mortalite_thermique(T, pch["colonies"], decote)
+            mort_conidie = taux_mortalite_thermique(T, pch["conidies"], decote)
+        else:
+            mort_col = mort_conidie = 0.0
         d["temps"].append(T)
         if hr is not None:
             d["hr"].append(hr)
@@ -374,6 +427,9 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
                 if c.spo >= 1.0:
                     c.etat, c.t_fin = "terminee", t
             if c.etat == "sporulante":
+                # la chaleur tue une fraction de la biomasse de la colonie (mortalité partielle, jamais totale grâce au plafond)
+                if mort_col > 0:
+                    c.n *= (1.0 - mort_col)
                 emission += c.n * f * pc["emission_par_colonie_jour"] / 24.0
                 if c.n > dom_n:
                     dom, dom_n = c, c.n
@@ -385,7 +441,7 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
             stock_col += emission
             lib_h = liberation_horaire(r.get("vent"), p)
             liberees = stock_col * lib_h
-            stock_col = (stock_col - liberees) * (1.0 - min(1.0, pv["perte_horaire_sur_colonies"] + uv_mort))
+            stock_col = (stock_col - liberees) * (1.0 - min(1.0, pv["perte_horaire_sur_colonies"] + max(uv_mort, mort_conidie)))
             pool += liberees
             d["liberation"].append(lib_h)
         else:
@@ -398,6 +454,17 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
             creer("secondaire", (dom.gen + 1) if dom else 1, t, nouvelles)
             d["nouvelles"] += nouvelles
 
+        # --- chasmothèces : cumul des heures froides pour déclencher l'initiation, puis intégrale de formation ---
+        pcs = p["chasmotheces"]
+        fraction_courante = min(1.0, d_total / cap_t)
+        if pcs["actif"] and T is not None:
+            if not initiation_chasmotheces:
+                if T < pcs["temperature_seuil_froid_c"]:
+                    heures_froid += 1
+                if heures_froid >= pcs["seuil_heures_froid"]:
+                    initiation_chasmotheces = True
+            if initiation_chasmotheces and fraction_courante > 0:
+                integral_chasmotheces += taux_chasmotheces(T, p) * fraction_courante * pcs["surface_poids"] / 24.0
         d["sporulantes"] = sum(c.n for c in actives if c.etat == "sporulante")
         d["fraction"] = min(1.0, d_total / cap_t)
         for seuil, cle in ((0.01, "fraction_1_pct"), (0.10, "fraction_10_pct"), (0.50, "fraction_50_pct")):
@@ -453,7 +520,11 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
         fen7g = [x for x in grap[max(0, i_ - 6): i_ + 1] if x is not None]
         d["indice_grappes_7j"] = round(sum(fen7g) / len(fen7g), 1) if fen7g else None
 
+    # Indice relatif de fin de saison -> stock d'ascospores de l'année suivante (normalisé à 1 si la saison est forte)
+    chasmotheces_indice = min(1.0, integral_chasmotheces)
     return {"parametres": p, "avertissements": avert, "debourrement": debourrement.isoformat(),
+            "chasmotheces": {"indice": round(chasmotheces_indice, 4), "initiation": initiation_chasmotheces,
+                             "heures_froid_cumul": heures_froid, "integral": round(integral_chasmotheces, 6)},
             "stock_ascospores_initial": stock_asc0, "primaires": primaires, "jalons": jalons, "generations": generations,
             "jours": sortie_jours,
             "donnees": {"vent_pct": round(vent_pct), "rayonnement_pct": round(ray_pct), "vent_actif": vent_actif, "uv_actif": uv_actif},
