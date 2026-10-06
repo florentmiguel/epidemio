@@ -128,5 +128,48 @@ class TestRecuperation(unittest.TestCase):
             rm.recuperer(49.25, 3.96, aujourdhui=self.AUJ, get=en_panne)
 
 
+class TestVentEtRayonnement(unittest.TestCase):
+    """Le vent (m/s à 10 m) et le rayonnement global (W/m²) alimentent le moteur oïdium ; ils sont facultatifs pour le mildiou."""
+
+    def test_les_requetes_demandent_vent_et_rayonnement_en_metres_par_seconde(self):
+        for url in (rm.url_archive(49.25, 3.96, date(2026, 1, 1), date(2026, 9, 28)), rm.url_prevision(49.25, 3.96, 8, 7)):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            variables = q["hourly"][0].split(",")
+            self.assertIn("wind_speed_10m", variables)
+            self.assertIn("shortwave_radiation", variables)
+            self.assertEqual(q["wind_speed_unit"], ["ms"])                      # Open-Meteo répond en km/h par défaut
+
+    def test_les_quatre_variables_de_base_restent_en_tete(self):
+        self.assertEqual(rm.VARIABLES[:4], ["temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"])
+        self.assertEqual(rm.VARIABLES[4:], ["wind_speed_10m", "shortwave_radiation"])
+
+    def test_les_valeurs_de_vent_et_de_rayonnement_sont_lues(self):
+        data = bloc(datetime(2026, 6, 1, 0, tzinfo=UTC), datetime(2026, 6, 1, 3, tzinfo=UTC))
+        data["hourly"]["wind_speed_10m"] = [1.5, 2.5, 3.5]
+        data["hourly"]["shortwave_radiation"] = [0.0, 100.0, 450.0]
+        lignes = rm._lignes(data)
+        self.assertEqual([lignes[f"2026-06-01T0{h}:00"]["wind_speed_10m"] for h in range(3)], [1.5, 2.5, 3.5])
+        self.assertEqual(lignes["2026-06-01T02:00"]["shortwave_radiation"], 450.0)
+
+    def test_une_reponse_sans_ces_variables_donne_des_valeurs_vides_pas_une_erreur(self):
+        lignes = rm._lignes(bloc(datetime(2026, 6, 1, 0, tzinfo=UTC), datetime(2026, 6, 1, 2, tzinfo=UTC)))
+        self.assertIsNone(lignes["2026-06-01T00:00"]["wind_speed_10m"])
+
+    def test_le_csv_contient_six_colonnes_et_le_moteur_les_relit(self):
+        lignes = [{"time": "2026-06-01T00:00", "temperature_2m": 12.0, "relative_humidity_2m": 80.0, "dew_point_2m": 9.0,
+                   "precipitation": 0.0, "wind_speed_10m": 3.2, "shortwave_radiation": None},
+                  {"time": "2026-06-01T01:00", "temperature_2m": 11.0, "relative_humidity_2m": 82.0, "dew_point_2m": 8.5,
+                   "precipitation": 0.2, "wind_speed_10m": None, "shortwave_radiation": 640.0}]
+        with tempfile.TemporaryDirectory() as d:
+            chemin = os.path.join(d, "m.csv")
+            rm.ecrire_csv(lignes, chemin)
+            with open(chemin, encoding="utf-8") as f:
+                en_tete = f.readline().strip().split(",")
+            self.assertEqual(en_tete, ["time"] + rm.VARIABLES)
+            relues = mp.charger_csv(chemin)
+        self.assertEqual((relues[0]["vent"], relues[0]["rayonnement"]), (3.2, None))
+        self.assertEqual((relues[1]["vent"], relues[1]["rayonnement"]), (None, 640.0))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

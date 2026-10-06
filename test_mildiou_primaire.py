@@ -995,6 +995,24 @@ class TestOutils(unittest.TestCase):
         self.assertTrue(mp.est_mouille({**base, "mouille": 0.9}, p))      # le capteur prime
         self.assertFalse(mp.est_mouille({**base, "pluie": 5.0, "mouille": 0.1}, p))
 
+    def test_csv_ancien_format_sans_vent_ni_rayonnement(self):
+        """Un CSV à 4 variables reste lisible : vent et rayonnement valent None (le moteur du mildiou ne s'en sert pas)."""
+        with tempfile.TemporaryDirectory() as d:
+            chemin = os.path.join(d, "m.csv")
+            with open(chemin, "w", encoding="utf-8") as f:
+                f.write("time,temperature_2m,relative_humidity_2m,dew_point_2m,precipitation\n2026-06-01T00:00,12.0,80,9,0.0\n")
+            r = mp.charger_csv(chemin)[0]
+        self.assertEqual((r["temp"], r["vent"], r["rayonnement"]), (12.0, None, None))
+
+    def test_csv_avec_vent_et_rayonnement(self):
+        with tempfile.TemporaryDirectory() as d:
+            chemin = os.path.join(d, "m.csv")
+            with open(chemin, "w", encoding="utf-8") as f:
+                f.write("time,temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,wind_speed_10m,shortwave_radiation\n"
+                        "2026-06-01T12:00,22.0,50,11,0.0,4.5,810.0\n")
+            r = mp.charger_csv(chemin)[0]
+        self.assertEqual((r["vent"], r["rayonnement"]), (4.5, 810.0))
+
     def test_csv_aller_retour(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
             w = csv.writer(f)

@@ -47,7 +47,8 @@ import recuperer_meteo_horaire as rm
 
 UTC = timezone.utc
 FORMAT = "%Y-%m-%dT%H:%M"
-VARIABLES = rm.VARIABLES                      # temperature_2m, relative_humidity_2m, dew_point_2m, precipitation
+VARIABLES = rm.VARIABLES                      # 4 variables de base + vent à 10 m et rayonnement global (facultatifs)
+COMPLEMENTS = rm.VARIABLES_COMPLEMENT         # une ligne sans vent ni rayonnement (ancien CSV) ne les efface jamais
 SOURCES_FIABLES = ("archive", "import")
 DECALAGE_ARCHIVE_J = 7                        # l'archive a ~5 jours de retard ; on s'en tient à J-7
 JOURS_PREVISION = 7
@@ -58,6 +59,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS meteo_horaire (
     position TEXT NOT NULL, t TEXT NOT NULL,
     temperature_2m REAL, relative_humidity_2m REAL, dew_point_2m REAL, precipitation REAL,
+    wind_speed_10m REAL, shortwave_radiation REAL,
     source TEXT NOT NULL, maj TEXT NOT NULL,
     PRIMARY KEY (position, t)
 ) WITHOUT ROWID;
@@ -94,6 +96,16 @@ class Historique:
         self.chemin = chemin or chemin_base()
         with self._connexion() as c:
             c.executescript(SCHEMA)
+            self._migrer(c)
+
+    @staticmethod
+    def _migrer(c):
+        """Base créée avant l'ajout du vent et du rayonnement : on ajoute les colonnes, les données existantes restent intactes
+        (valeurs NULL jusqu'à un nouvel import ou à la prochaine prévision)."""
+        existantes = {r["name"] for r in c.execute("PRAGMA table_info(meteo_horaire)")}
+        for v in VARIABLES:
+            if v not in existantes:
+                c.execute(f"ALTER TABLE meteo_horaire ADD COLUMN {v} REAL")
 
     # -- infrastructure -------------------------------------------------------------------------------------------
     @contextmanager
@@ -142,18 +154,19 @@ class Historique:
     def _ecrire(self, c, pos, lignes: dict, source: str, now: datetime) -> int:
         """Écrit {heure: {variable: valeur}}. Une ligne sans température est ignorée (l'archive n'a pas encore ces heures).
         Une prévision n'écrase JAMAIS une ligne fiable ; une ligne fiable écrase tout."""
+        colonnes = ", ".join(VARIABLES)
+        valeurs = ",".join("?" * len(VARIABLES))
+        # vent et rayonnement : une ligne qui n'en a pas (ancien CSV) ne doit jamais effacer ceux déjà stockés
+        maj = ", ".join(f"{nom}=COALESCE(excluded.{nom}, meteo_horaire.{nom})" if nom in COMPLEMENTS else f"{nom}=excluded.{nom}"
+                        for nom in VARIABLES)
+        sql = (f"INSERT INTO meteo_horaire(position, t, {colonnes}, source, maj) VALUES (?,?,{valeurs},?,?) "
+               f"ON CONFLICT(position, t) DO UPDATE SET {maj}, source=excluded.source, maj=excluded.maj "
+               "WHERE excluded.source IN ('archive','import') OR meteo_horaire.source='prevision'")
         n = 0
-        for t, v in lignes.items():
-            if v.get("temperature_2m") is None:
+        for t, ligne in lignes.items():
+            if ligne.get("temperature_2m") is None:
                 continue
-            c.execute(
-                "INSERT INTO meteo_horaire(position, t, temperature_2m, relative_humidity_2m, dew_point_2m, precipitation, "
-                "source, maj) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(position, t) DO UPDATE SET "
-                "temperature_2m=excluded.temperature_2m, relative_humidity_2m=excluded.relative_humidity_2m, "
-                "dew_point_2m=excluded.dew_point_2m, precipitation=excluded.precipitation, source=excluded.source, "
-                "maj=excluded.maj WHERE excluded.source IN ('archive','import') OR meteo_horaire.source='prevision'",
-                (pos, t, v.get("temperature_2m"), v.get("relative_humidity_2m"), v.get("dew_point_2m"),
-                 v.get("precipitation"), source, _iso(now)))
+            c.execute(sql, (pos, t, *[ligne.get(nom) for nom in VARIABLES], source, _iso(now)))
             n += 1
         return n
 
@@ -177,7 +190,7 @@ class Historique:
         """Lignes au format d'Open-Meteo, triées, du 1er janvier de l'année à la dernière heure stockée."""
         with self._connexion() as c:
             rows = c.execute(
-                "SELECT t, temperature_2m, relative_humidity_2m, dew_point_2m, precipitation FROM meteo_horaire "
+                f"SELECT t, {', '.join(VARIABLES)} FROM meteo_horaire "
                 "WHERE position=? AND t>=? ORDER BY t", (self.cle(lat, lon), f"{annee}-01-01T00:00")).fetchall()
         return [{"time": r["t"], **{v: r[v] for v in VARIABLES}} for r in rows]
 

@@ -5,7 +5,9 @@ Météo horaire d'une position, du 1er janvier à la prévision (Open-Meteo)
 ========================================================================
 
 Produit le CSV attendu par mildiou_primaire.py :
-    time, temperature_2m, relative_humidity_2m, dew_point_2m, precipitation
+    time, temperature_2m, relative_humidity_2m, dew_point_2m, precipitation, wind_speed_10m, shortwave_radiation
+(les deux dernières colonnes sont facultatives pour le moteur du mildiou ; le moteur de l'oïdium s'en sert : vent = dispersion des
+conidies, rayonnement = proxy des ultraviolets)
 
 * Passé : API « archive » (réanalyse), dont les données ont ~5 jours de délai.
 * Jours récents + prévision : API de prévision avec past_days.
@@ -30,7 +32,9 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
-VARIABLES = ["temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"]
+VARIABLES_BASE = ["temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"]
+VARIABLES_COMPLEMENT = ["wind_speed_10m", "shortwave_radiation"]      # vent à 10 m (m/s), rayonnement global (W/m²)
+VARIABLES = VARIABLES_BASE + VARIABLES_COMPLEMENT
 URL_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 URL_PREVISION = "https://api.open-meteo.com/v1/forecast"
 
@@ -58,12 +62,12 @@ def _lignes(data: dict) -> dict:
 
 def url_archive(lat, lon, debut: date, fin: date) -> str:
     q = {"latitude": lat, "longitude": lon, "start_date": debut.isoformat(),
-         "end_date": fin.isoformat(), "hourly": ",".join(VARIABLES)}
+         "end_date": fin.isoformat(), "hourly": ",".join(VARIABLES), "wind_speed_unit": "ms"}
     return f"{URL_ARCHIVE}?{urllib.parse.urlencode(q)}"
 
 
 def url_prevision(lat, lon, jours_passes: int, jours_futurs: int) -> str:
-    q = {"latitude": lat, "longitude": lon, "hourly": ",".join(VARIABLES),
+    q = {"latitude": lat, "longitude": lon, "hourly": ",".join(VARIABLES), "wind_speed_unit": "ms",
          "past_days": min(92, max(0, jours_passes)), "forecast_days": jours_futurs}
     return f"{URL_PREVISION}?{urllib.parse.urlencode(q)}"
 

@@ -238,6 +238,8 @@ def charger_csv(chemin: str) -> list[dict]:
                 "pluie": _flottant(r.get("precipitation")),
                 "rosee": _flottant(r.get("dew_point_2m")),
                 "mouille": _flottant(r.get("leaf_wetness")),
+                "vent": _flottant(r.get("wind_speed_10m")),                # m/s à 10 m (facultatif ; sert au moteur oïdium)
+                "rayonnement": _flottant(r.get("shortwave_radiation")),    # W/m² (facultatif ; proxy des UV, moteur oïdium)
             })
     lignes.sort(key=lambda x: x["t"])
     return lignes

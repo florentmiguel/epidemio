@@ -20,9 +20,18 @@ mémoire sont manifestement fautives (décimale perdue, chiffres inversés) et o
   * infection par les conidies : I0·F(T)·exp(−τ·âge de la feuille)·min(1, a·HR − b), a = 0,0213 (imprimé 0,0023), b = 0,8068 ;
     réduite par l'eau libre (figure I du mémoire).
 
-Ce que le moteur ne fait PAS (v0) : vent, rayonnement UV, croissance de la vigne (surface foliaire constante), résistance
-ontogénique des grappes, conservation hivernale détaillée (cléistothèces), traitements phytosanitaires (le moteur évalue le
-danger indépendamment des traitements, comme celui du mildiou).
+Facteurs externes (v1), tous facultatifs et neutres quand la donnée manque :
+  * VENT (Willocquet et al. 1998, d'après Garin 2011, Eq. 18) : les conidies s'accumulent sur les colonies et ne sont libérées que par
+    le vent ; le rapport au taux de libération de référence conserve le calage de l'émission ;
+  * ULTRAVIOLETS (Austin et Wilcox 2010) : le rayonnement global sert de proxy ; il tue une part des conidies (sur les colonies et dans
+    l'air) et réduit l'infection, sur la fraction exposée du feuillage seulement ;
+  * STADE PHÉNOLOGIQUE et RÉSISTANCE ONTOGÉNIQUE (phenologie.py) : surface foliaire disponible, sensibilité des feuilles, et indice des
+    GRAPPES (favorabilité × sensibilité ontogénique). Le stade vient des degrés-jours depuis le débourrement, recalable sur des observations.
+Les paramètres des trois facteurs sont des HYPOTHÈSES DE TRAVAIL, non calées sur la Champagne.
+
+Ce que le moteur ne fait PAS : conservation hivernale détaillée (cléistothèces), effet du gel sur la surface foliaire (paramètre
+`phenologie.surface_foliaire_max`), traitements phytosanitaires (le moteur évalue le danger indépendamment des traitements, comme
+celui du mildiou).
 
 Unités : les colonies sont en unités RELATIVES (une capacité d'accueil de la vigne fixe l'échelle). Seuls les rythmes et les dates
 ont un sens avant calage sur le terrain.
@@ -39,6 +48,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import mildiou_primaire as mp
+import phenologie as phen
 
 UTC = timezone.utc
 
@@ -76,6 +86,34 @@ PARAMS = {
         # Indice annuel de sortie d'hiver (0 à 100) du modèle Oïdi (Modeline, adapté du SOV) publié dans le BSV : s'il est donné, il remplace la
         # sévérité de l'année précédente. Hypothèse v0, à caler : stock d'ascospores relatif = indice / 100.
         "indice_oidi": None,
+    },
+    # Vent : libération des conidies (Eq. 18 de Garin 2011, d'après Willocquet et al. 1998). Actif dès qu'une heure porte une valeur de vent.
+    "vent": {
+        "actif": None,                          # None : automatique ; False : désactivé (compare les scénarios)
+        "facteur_canopee": 0.5,                 # vent dans le feuillage / vent à 10 m (hypothèse)
+        "willocquet": {"r": 0.41, "a": 0.71, "b": -5.8},
+        "vitesse_reference_ms": 2.0,            # vitesse dans le feuillage pour laquelle la libération horaire vaut `liberation_horaire_ref`
+        "liberation_horaire_ref": 0.02,         # part du stock de conidies libérée chaque heure à la vitesse de référence (lente devant la
+                                                # perte de viabilité : sinon le vent ne ferait que décaler les conidies de quelques heures)
+        "facteur_max": 20.0,                    # plafond du rapport (taux à la vitesse observée / taux de référence)
+        "perte_horaire_sur_colonies": 0.01,     # viabilité perdue chaque heure par les conidies qui attendent le vent
+    },
+    # Ultraviolets (Austin et Wilcox 2010) : le rayonnement global sert de proxy.
+    "uv": {
+        "actif": None,
+        "rayonnement_reference_wm2": 800.0,     # plein soleil
+        "part_exposee": 0.5,                    # fraction du feuillage directement exposée (le reste est à l'ombre)
+        "mortalite_horaire": 0.12,              # part des conidies tuées chaque heure à pleine exposition (sur la fraction exposée)
+        "reduction_infection": 0.6,              # réduction de l'infection et de la favorabilité à pleine exposition (sur la fraction exposée)
+    },
+    # Phénologie et résistance ontogénique : voir phenologie.py
+    "phenologie": {
+        "actif": None,                          # None : automatique (actif si la série couvre le débourrement) ; False : désactivé
+        "base_djc": 10.0,
+        "table_djc": None,                      # [[BBCH, DJC], ...] pour remplacer la table par défaut
+        "observations": {},                     # {"2026-05-15": 17, ...} stades observés : recalent la table
+        "surface_foliaire_max": 1.0,            # < 1 après un gel : la surface foliaire maximale est réduite
+        "sensibilite_feuilles": True,
     },
     "capacite_colonies": 1000.0,             # colonies maximales avant saturation du feuillage (échelle relative)
     "seuil_visible": 0.001,                  # fraction de la capacité sporulante à partir de laquelle des symptômes sont repérables
@@ -117,14 +155,42 @@ def facteur_humidite(hr: float | None, p: dict) -> float:
     return max(0.0, min(1.0, i["hr_a"] * hr - i["hr_b"]))
 
 
-def potentiel_horaire(t: float, hr: float | None, mouille: bool, p: dict) -> float:
-    """Favorabilité de l'heure à l'épidémie, 0 à 1 : température × humidité de l'air, réduite par l'eau libre."""
-    return f_temp(t, p) * facteur_humidite(hr, p) * (p["infection"]["eau_libre"] if mouille else 1.0)
+def taux_dispersion(vitesse: float, p: dict) -> float:
+    """Part des conidies décrochées d'une colonie en fonction du vent (m/s) : Eq. 18 de Garin 2011 (Willocquet et al. 1998)."""
+    w = p["vent"]["willocquet"]
+    e = math.exp(w["r"] * vitesse + w["b"])
+    return min(1.0, e / (w["a"] * (1.0 + e)))
 
 
-def probabilite_infection(t: float, hr: float | None, mouille: bool, p: dict) -> float:
+def liberation_horaire(vent_10m: float | None, p: dict) -> float:
+    """Part du stock de conidies libérée en une heure. À la vitesse de référence (dans le feuillage), elle vaut `liberation_horaire_ref`,
+    ce qui garde à l'émission sa signification ; plus de vent la multiplie (jusqu'à `facteur_max`). Vent inconnu : valeur de référence."""
+    pv = p["vent"]
+    ref = pv["liberation_horaire_ref"]
+    if vent_10m is None:
+        return ref
+    u = max(0.0, vent_10m) * pv["facteur_canopee"]
+    rapport = min(pv["facteur_max"], taux_dispersion(u, p) / taux_dispersion(pv["vitesse_reference_ms"], p))
+    return min(1.0, ref * rapport)
+
+
+def exposition_uv(rayonnement: float | None, p: dict) -> float:
+    """Exposition aux UV de la fraction du feuillage éclairée : 0 la nuit ou sans donnée, `part_exposee` en plein soleil."""
+    if rayonnement is None:
+        return 0.0
+    pu = p["uv"]
+    return min(1.0, max(0.0, rayonnement) / pu["rayonnement_reference_wm2"]) * pu["part_exposee"]
+
+
+def potentiel_horaire(t: float, hr: float | None, mouille: bool, p: dict, uv: float = 0.0) -> float:
+    """Favorabilité de l'heure à l'épidémie, 0 à 1 : température × humidité de l'air, réduite par l'eau libre et par les UV."""
+    return (f_temp(t, p) * facteur_humidite(hr, p) * (p["infection"]["eau_libre"] if mouille else 1.0)
+            * (1.0 - p["uv"]["reduction_infection"] * uv))
+
+
+def probabilite_infection(t: float, hr: float | None, mouille: bool, p: dict, uv: float = 0.0) -> float:
     i = p["infection"]
-    return i["i0"] * math.exp(-i["tau"] * i["age_feuille_j"]) * potentiel_horaire(t, hr, mouille, p)
+    return i["i0"] * math.exp(-i["tau"] * i["age_feuille_j"]) * potentiel_horaire(t, hr, mouille, p, uv)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +237,25 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
     capacite = p["capacite_colonies"]
     seuil_vis = p["seuil_visible"] * capacite
     ph = {"humectation": p["humectation"]}
+    pv, pu, pf = p["vent"], p["uv"], p["phenologie"]
+
+    # --- données externes : disponibilité et activation (neutres quand la donnée manque) ---
+    vent_pct = 100.0 * sum(1 for r in rows if r.get("vent") is not None) / len(rows)
+    ray_pct = 100.0 * sum(1 for r in rows if r.get("rayonnement") is not None) / len(rows)
+    vent_actif = pv["actif"] is not False and vent_pct > 0
+    uv_actif = pu["actif"] is not False and ray_pct > 0
+    if vent_actif and vent_pct < 95:
+        avert.append(f"vent renseigné pour {vent_pct:.0f} % des heures : les autres reçoivent la libération de référence")
+    if uv_actif and ray_pct < 95:
+        avert.append(f"rayonnement renseigné pour {ray_pct:.0f} % des heures : les autres sont sans effet des UV")
+    bbch_jour = {}
+    if pf["actif"] is not False:
+        table = (tuple((float(b) if float(b) != int(b) else int(b), float(d)) for b, d in pf["table_djc"])
+                 if pf["table_djc"] else phen.TABLE_DJC)
+        bbch_jour = phen.serie_bbch(rows, debourrement, tz, pf["observations"] or None, table, pf["base_djc"])
+        if not bbch_jour and pf["actif"] is True:
+            avert.append("phénologie indisponible : la série ne couvre pas le débourrement")
+    phen_actif = bool(bbch_jour)
 
     # pluie sur les k dernières heures
     k = max(1, int(pp["pluie_heures"]))
@@ -185,7 +270,7 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
     seed_i = 0
 
     actives, toutes = [], []
-    pool, d_total, prochain_id = 0.0, 0.0, 1
+    pool, stock_col, d_total, prochain_id = 0.0, 0.0, 0.0, 1
     primaires, jours, jalons = [], {}, {}
     dernier_primaire = None
 
@@ -206,12 +291,31 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
         j = jour_local(t)
         mouille = mp.est_mouille(r, ph)
         f = f_temp(T, p)
-        d = jours.setdefault(j, {"temps": [], "hr": [], "pluie": 0.0, "potentiel": [], "lat_vitesse": 0.0, "nouvelles": 0.0})
+        d = jours.setdefault(j, {"temps": [], "hr": [], "pluie": 0.0, "potentiel": [], "lat_vitesse": 0.0, "nouvelles": 0.0,
+                                 "vent": [], "ray": [], "liberation": [], "grappes": [], "bbch": None})
+        # phénologie du jour : stade, surface foliaire disponible, sensibilité des feuilles et des grappes
+        bb = bbch_jour.get(j) if phen_actif else None
+        if phen_actif:
+            cap_t = max(1e-9, capacite * phen.surface_foliaire(bb) * pf["surface_foliaire_max"])
+            sf = phen.sens_feuilles(bb) if pf["sensibilite_feuilles"] else 1.0
+            sb = phen.sens_grappes(bb)
+            d["bbch"] = bb
+        else:
+            cap_t, sf, sb = capacite, 1.0, None
+        expo = exposition_uv(r.get("rayonnement"), p) if uv_actif else 0.0
+        uv_mort = pu["mortalite_horaire"] * expo
         d["temps"].append(T)
         if hr is not None:
             d["hr"].append(hr)
+        if r.get("vent") is not None:
+            d["vent"].append(r["vent"])
+        if r.get("rayonnement") is not None:
+            d["ray"].append(r["rayonnement"])
         d["pluie"] += r["pluie"] or 0.0
-        d["potentiel"].append(potentiel_horaire(T, hr, mouille, p))
+        pot_h = potentiel_horaire(T, hr, mouille, p, expo)
+        d["potentiel"].append(pot_h)
+        if sb is not None:
+            d["grappes"].append(pot_h * sb)
         d["lat_vitesse"] += f / (p["latence"]["jours_optimum"] * 24.0)
 
         # --- amorçages manuels ---
@@ -224,7 +328,7 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
                 and T is not None and T >= pp["temperature_min"] and 0.0 < f and dernier_primaire != j):
             q = stock_asc * pp["fraction_par_evenement"]
             stock_asc -= q
-            n = pp["colonies_par_evenement"] * q * f          # q est en unités de stock (1,0 = stock plein) : la sévérité l'échelonne
+            n = pp["colonies_par_evenement"] * q * f * sf     # q est en unités de stock (1,0 = stock plein) : la sévérité l'échelonne
             if n > 1e-12:
                 c = creer("primaire", 0, t, n)
                 primaires.append({"t": _iso(t), "colonies": round(n, 6), "pluie_mm": round(pluie6[i], 1), "temperature": T})
@@ -250,17 +354,25 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
             actives = [c for c in actives if c.etat != "terminee"]
 
         # --- conidies : émission, dépôt, infection de tissu sain ---
-        pool += emission
+        if vent_actif:                                   # les conidies attendent le vent sur les colonies
+            stock_col += emission
+            lib_h = liberation_horaire(r.get("vent"), p)
+            liberees = stock_col * lib_h
+            stock_col = (stock_col - liberees) * (1.0 - min(1.0, pv["perte_horaire_sur_colonies"] + uv_mort))
+            pool += liberees
+            d["liberation"].append(lib_h)
+        else:
+            pool += emission
         deposees = pool * pc["depot_horaire"]
-        pool -= deposees + pool * pc["perte_horaire"]
-        sain = max(0.0, 1.0 - d_total / capacite)
-        nouvelles = deposees * probabilite_infection(T, hr, mouille, p) * sain if T is not None else 0.0
+        pool -= deposees + pool * (pc["perte_horaire"] + uv_mort)
+        sain = max(0.0, 1.0 - d_total / cap_t)
+        nouvelles = deposees * probabilite_infection(T, hr, mouille, p, expo) * sf * sain if T is not None else 0.0
         if nouvelles > 1e-12:
             creer("secondaire", (dom.gen + 1) if dom else 1, t, nouvelles)
             d["nouvelles"] += nouvelles
 
         d["sporulantes"] = sum(c.n for c in actives if c.etat == "sporulante")
-        d["fraction"] = d_total / capacite
+        d["fraction"] = min(1.0, d_total / cap_t)
         for seuil, cle in ((0.01, "fraction_1_pct"), (0.10, "fraction_10_pct"), (0.50, "fraction_50_pct")):
             if cle not in jalons and d["fraction"] >= seuil:
                 jalons[cle] = j.isoformat()
@@ -279,7 +391,14 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
             "potentiel_pct": round(100.0 * sum(d["potentiel"]) / len(d["potentiel"]), 1),
             "latence_equivalente_j": round(min(lat_eq, 99.0), 1) if lat_eq else None,
             "nouvelles_colonies": round(d["nouvelles"], 6), "colonies_sporulantes": round(d["sporulantes"], 4),
-            "fraction_malade": round(d["fraction"], 6), "previsionnel": j > ref})
+            "fraction_malade": round(d["fraction"], 6), "previsionnel": j > ref,
+            "vent_moy_ms": round(sum(d["vent"]) / len(d["vent"]), 1) if d["vent"] else None,
+            "rayonnement_moy_wm2": round(sum(d["ray"]) / len(d["ray"]), 0) if d["ray"] else None,
+            "liberation_pct": round(100.0 * sum(d["liberation"]) / len(d["liberation"]), 1) if d["liberation"] else None,
+            "bbch": round(d["bbch"], 1) if d["bbch"] is not None else None,
+            "sens_feuilles": round(phen.sens_feuilles(d["bbch"]), 2) if d["bbch"] is not None else None,
+            "sens_grappes": round(phen.sens_grappes(d["bbch"]), 2) if d["bbch"] is not None else None,
+            "indice_grappes_pct": round(100.0 * sum(d["grappes"]) / len(d["grappes"]), 1) if d["grappes"] else None})
 
     gens = {}
     for c in toutes:
@@ -300,13 +419,20 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
 
     # moyenne glissante de 7 jours du potentiel (présentation à la manière de VitiMeteo-Oidium)
     pots = [d["potentiel_pct"] for d in sortie_jours]
+    grap = [d["indice_grappes_pct"] for d in sortie_jours]
     for i_, d in enumerate(sortie_jours):
         fen7 = pots[max(0, i_ - 6): i_ + 1]
         d["indice_7j"] = round(sum(fen7) / len(fen7), 1)
+        fen7g = [x for x in grap[max(0, i_ - 6): i_ + 1] if x is not None]
+        d["indice_grappes_7j"] = round(sum(fen7g) / len(fen7g), 1) if fen7g else None
 
     return {"parametres": p, "avertissements": avert, "debourrement": debourrement.isoformat(),
             "stock_ascospores_initial": stock_asc0, "primaires": primaires, "jalons": jalons, "generations": generations,
             "jours": sortie_jours,
+            "donnees": {"vent_pct": round(vent_pct), "rayonnement_pct": round(ray_pct), "vent_actif": vent_actif, "uv_actif": uv_actif},
+            "phenologie": {"actif": phen_actif,
+                           "calendrier": phen.calendrier(bbch_jour) if phen_actif else {},
+                           "fenetre_grappes": list(phen.fenetre(bbch_jour, phen.sens_grappes, 0.5)) if phen_actif else [None, None]},
             "cohortes": [{"id": c.id, "source": c.source, "generation": c.gen, "infection": _iso(c.t_inf), "colonies": round(c.n, 8),
                           "symptomes": _iso(c.t_symp), "fin_sporulation": _iso(c.t_fin)} for c in toutes]}
 
@@ -342,8 +468,11 @@ def fenetre_infection(retro: dict, observation: date, tolerance_j: int = 3) -> l
     return sorted(j for j, s in retro.items() if s and abs((s - observation).days) <= tolerance_j)
 
 
-def analyse_retro(rows: list[dict], observations: list[date], params: dict | None = None, tolerance_j: int = 3) -> list[dict]:
-    """Pour chaque date d'observation de symptômes : fenêtre d'infection correspondante, latence, favorabilité de ces jours et rang dans la saison."""
+def analyse_retro(rows: list[dict], observations: list[date], params: dict | None = None, tolerance_j: int = 3,
+                  delai_visible_j: int = 0) -> list[dict]:
+    """Pour chaque date d'observation de symptômes : fenêtre d'infection correspondante, latence, favorabilité de ces jours et rang dans la saison.
+    delai_visible_j : jours qui séparent la fin de la latence (début de sporulation) du moment où les symptômes sont repérés au vignoble ;
+    la date de fin de latence recherchée est l'observation moins ce délai."""
     p = mp.fusionner(PARAMS, params)
     res = calculer_saison(rows, {**(params or {}), "primaire": {**(params or {}).get("primaire", {}), "severite_precedente": 0}})
     retro = retro_symptomes(rows, params)
@@ -355,9 +484,9 @@ def analyse_retro(rows: list[dict], observations: list[date], params: dict | Non
     saison = sorted(v for j, v in pot.items() if ref_debut <= j <= ref_fin)
     sortie = []
     for obs in observations:
-        jours = fenetre_infection(retro, obs, tolerance_j)
+        jours = fenetre_infection(retro, obs - timedelta(days=delai_visible_j), tolerance_j)
         if not jours:
-            sortie.append({"observation": obs.isoformat(), "infections": None})
+            sortie.append({"observation": obs.isoformat(), "infections": None, "delai_visible_j": delai_visible_j})
             continue
         moyenne = sum(pot[j] for j in jours if j in pot) / len([j for j in jours if j in pot])
         rang = 100.0 * sum(1 for v in saison if v < moyenne) / len(saison) if saison else None
@@ -365,9 +494,15 @@ def analyse_retro(rows: list[dict], observations: list[date], params: dict | Non
         sortie.append({"observation": obs.isoformat(), "infections": [jours[0].isoformat(), jours[-1].isoformat()],
                        "latence_j": [min(lats), max(lats)], "potentiel_moyen_pct": round(moyenne, 1),
                        "rang_saison_pct": round(rang, 0) if rang is not None else None,
-                       "periode_reference": [ref_debut.isoformat(), ref_fin.isoformat()],
+                       "periode_reference": [ref_debut.isoformat(), ref_fin.isoformat()], "delai_visible_j": delai_visible_j,
                        "meilleur_jour": max(jours, key=lambda j: pot.get(j, -1)).isoformat()})
     return sortie
+
+
+def sensibilite_delai(rows: list[dict], observation: date, delais=(0, 3, 5, 7), params: dict | None = None, tolerance_j: int = 3) -> list[dict]:
+    """Une même observation lue avec plusieurs délais de détection : montre si l'explication météo tient quand on tient compte du temps
+    que mettent les colonies à devenir repérables."""
+    return [analyse_retro(rows, [observation], params, tolerance_j, d)[0] for d in delais]
 
 
 def balayage_graines(rows: list[dict], debut: date, fin: date, pas_j: int = 7, params: dict | None = None) -> list[dict]:
@@ -388,9 +523,14 @@ def balayage_graines(rows: list[dict], debut: date, fin: date, pas_j: int = 7, p
 # Lecture humaine et ligne de commande
 # ---------------------------------------------------------------------------
 def resume(res: dict, pas_j: int = 7) -> str:
-    L = [f"OÏDIUM — cycle par cohortes (v0, formalismes de la littérature, non calé)",
+    dn = res["donnees"]
+    L = [f"OÏDIUM — cycle par cohortes (v1, formalismes de la littérature, non calé)",
          f"  débourrement : {res['debourrement']} | stock d'ascospores relatif : {res['stock_ascospores_initial']}",
-         f"  infections primaires : {len(res['primaires'])}"]
+         f"  vent : {dn['vent_pct']} % des heures renseignées ({'actif' if dn['vent_actif'] else 'inactif'}) | "
+         f"rayonnement : {dn['rayonnement_pct']} % ({'UV actifs' if dn['uv_actif'] else 'UV inactifs'}) | "
+         f"phénologie : {'active' if res['phenologie']['actif'] else 'inactive'}"]
+    L += [f"  ! {a}" for a in res["avertissements"]]
+    L.append(f"  infections primaires : {len(res['primaires'])}")
     for e in res["primaires"][:6]:
         L.append(f"    {e['t']}  pluie {e['pluie_mm']} mm  T {e['temperature']} °C  -> {e['colonies']} colonie(s)")
     L.append("\nJALONS")
@@ -401,12 +541,30 @@ def resume(res: dict, pas_j: int = 7) -> str:
     L.append("\nGÉNÉRATIONS (dates de sortie des symptômes ; 0 = infections primaires)")
     for g in res["generations"][:8]:
         L.append(f"  G{g['generation']}  premiers {g['premiers_symptomes']}  médiane {g['mediane']}  ({g['cohortes']} cohortes)")
+    if res["phenologie"]["actif"]:
+        L.append("\n" + resume_calendrier(res))
     L.append(f"\nÉVOLUTION (un point tous les {pas_j} jours)")
-    L.append("  date        T moy  potentiel  indice 7 j  latence éq.  sporulantes  feuillage atteint")
+    L.append("  date        T moy  BBCH  potentiel  indice 7 j  grappes 7 j  latence éq.  sporulantes  feuillage atteint")
     for d in res["jours"][::pas_j]:
         lat = f"{d['latence_equivalente_j']:>5.1f} j" if d["latence_equivalente_j"] is not None else "  bloquée"
-        L.append(f"  {d['date']}  {d['tmoy']:>5.1f}  {d['potentiel_pct']:>7.1f} %  {d['indice_7j']:>8.1f} %  {lat}   "
+        bb = f"{d['bbch']:>4.0f}" if d["bbch"] is not None else "   -"
+        gr = f"{d['indice_grappes_7j']:>9.1f} %" if d["indice_grappes_7j"] is not None else "        -  "
+        L.append(f"  {d['date']}  {d['tmoy']:>5.1f}  {bb}  {d['potentiel_pct']:>7.1f} %  {d['indice_7j']:>8.1f} %  {gr}  {lat}   "
                  f"{d['colonies_sporulantes']:>10.3f}   {100 * d['fraction_malade']:>9.4f} %")
+    return "\n".join(L)
+
+
+def resume_calendrier(res: dict) -> str:
+    """Calendrier phénologique estimé (DJC base 10 depuis le débourrement) et fenêtre de réceptivité des grappes."""
+    f = res["phenologie"]
+    if not f["actif"]:
+        return "PHÉNOLOGIE INACTIVE : la série ne couvre pas le débourrement, ou la phénologie est désactivée."
+    L = [f"CALENDRIER PHÉNOLOGIQUE ESTIMÉ (degrés-jours base 10 depuis le débourrement du {res['debourrement']} ; "
+         "à confronter à tes relevés, puis à recaler avec --bbch DATE:STADE)"]
+    for nom, jour in f["calendrier"].items():
+        L.append(f"  {nom:<26}: {jour or 'non atteint'}")
+    d1, d2 = f["fenetre_grappes"]
+    L.append(f"  grappes réceptives (sensibilité >= 50 %) : du {d1 or '-'} au {d2 or '-'}")
     return "\n".join(L)
 
 
@@ -422,6 +580,18 @@ def resume_retro(analyses: list[dict], tolerance: int) -> str:
         rang = (f"meilleure que {a['rang_saison_pct']:.0f} % des jours du {a['periode_reference'][0][5:]} au {a['periode_reference'][1][5:]}"
                 if a["rang_saison_pct"] is not None else "rang indisponible (aucun jour de référence dans la série)")
         L.append(f"    favorabilité moyenne de ces jours : {a['potentiel_moyen_pct']} %  -> {rang} ; jour le plus favorable : {a['meilleur_jour']}")
+    return "\n".join(L)
+
+
+def resume_sensibilite(observation: date, lignes: list[dict]) -> str:
+    L = [f"  symptômes le {observation.isoformat()} : selon le délai entre fin de latence et repérage au vignoble"]
+    for a in lignes:
+        if not a["infections"]:
+            L.append(f"    délai {a['delai_visible_j']} j : aucune infection de la série n'y conduit")
+            continue
+        rang = f"{a['rang_saison_pct']:.0f} %" if a["rang_saison_pct"] is not None else "n.d."
+        L.append(f"    délai {a['delai_visible_j']} j : infections du {a['infections'][0][5:]} au {a['infections'][1][5:]}  "
+                 f"favorabilité {a['potentiel_moyen_pct']:>5} %  (meilleure que {rang} des jours)")
     return "\n".join(L)
 
 
@@ -442,13 +612,30 @@ def main(argv=None):
     ap.add_argument("--indice-oidi", type=float, help="indice de sortie d'hiver 0 à 100 du modèle Oïdi (BSV) ; remplace --severite")
     ap.add_argument("--graine", action="append", default=[], help="amorçage manuel : AAAA-MM-JJ[THH:MM] (répétable)")
     ap.add_argument("--multiplication", type=float, help="émission de conidies par colonie et par jour (calage)")
+    ap.add_argument("--bbch", nargs="+", metavar="DATE:STADE", help="stades observés (ex. 2026-05-15:17) : recalent la phénologie")
+    ap.add_argument("--calendrier", action="store_true", help="affiche seulement le calendrier phénologique estimé")
+    ap.add_argument("--sans-vent", action="store_true", help="ignore le vent (compare les scénarios)")
+    ap.add_argument("--sans-uv", action="store_true", help="ignore le rayonnement (UV)")
+    ap.add_argument("--sans-phenologie", action="store_true", help="ignore le stade, la surface foliaire et la résistance ontogénique")
     ap.add_argument("--fenetre", type=int, help="durée (jours) pendant laquelle les ascospores peuvent infecter après le débourrement (défaut 60)")
     ap.add_argument("--pas", type=int, default=7, help="un point d'affichage tous les N jours")
     ap.add_argument("--retro", nargs="+", metavar="DATE", help="dates observées de symptômes (AAAA-MM-JJ) : remonte aux jours d'infection")
     ap.add_argument("--tolerance", type=int, default=3, help="tolérance de la date observée, en jours (défaut 3)")
+    ap.add_argument("--delai", type=int, default=0, help="délai (jours) entre fin de latence et repérage des symptômes au vignoble (défaut 0)")
     ap.add_argument("--balayage", nargs=2, metavar=("DEBUT", "FIN"), help="amorçages successifs entre deux dates : générations simulées")
     a = ap.parse_args(argv)
-    surcharge = {"primaire": {}, "conidies": {}}
+    surcharge = {"primaire": {}, "conidies": {}, "vent": {}, "uv": {}, "phenologie": {}}
+    if a.sans_vent:
+        surcharge["vent"]["actif"] = False
+    if a.sans_uv:
+        surcharge["uv"]["actif"] = False
+    if a.sans_phenologie:
+        surcharge["phenologie"]["actif"] = False
+    if a.bbch:
+        try:
+            surcharge["phenologie"]["observations"] = {x.split(":")[0]: float(x.split(":")[1]) for x in a.bbch}
+        except (IndexError, ValueError):
+            ap.error("--bbch attend des paires DATE:STADE, par exemple 2026-05-15:17")
     if a.debourrement:
         surcharge["primaire"]["debourrement"] = a.debourrement
     if a.indice_oidi is not None:
@@ -462,14 +649,21 @@ def main(argv=None):
     if a.graine:
         surcharge["infections_initiales"] = [{"t": g if "T" in g else g + "T00:00", "n": 1.0} for g in a.graine]
     rows = mp.charger_csv(a.csv)
-    if a.retro:
-        print(resume_retro(analyse_retro(rows, [date.fromisoformat(x) for x in a.retro], surcharge, a.tolerance), a.tolerance))
-        return
-    if a.balayage:
-        print(resume_balayage(balayage_graines(rows, date.fromisoformat(a.balayage[0]), date.fromisoformat(a.balayage[1]), 7, surcharge)))
-        return
-    print(resume(calculer_saison(rows, surcharge), a.pas))
-
+    try:
+        if a.calendrier:
+            print(resume_calendrier(calculer_saison(rows, surcharge)))
+        elif a.retro:
+            obs = [date.fromisoformat(x) for x in a.retro]
+            print(resume_retro(analyse_retro(rows, obs, surcharge, a.tolerance, a.delai), a.tolerance))
+            print("\nSENSIBILITÉ AU DÉLAI DE DÉTECTION (les colonies ne sont repérées que quelques jours après la fin de la latence)")
+            for o in obs:
+                print(resume_sensibilite(o, sensibilite_delai(rows, o, (0, 3, 5, 7), surcharge, a.tolerance)))
+        elif a.balayage:
+            print(resume_balayage(balayage_graines(rows, date.fromisoformat(a.balayage[0]), date.fromisoformat(a.balayage[1]), 7, surcharge)))
+        else:
+            print(resume(calculer_saison(rows, surcharge), a.pas))
+    except ValueError as e:                              # observation de stade hors série, date mal écrite, série vide...
+        sys.exit(f"Erreur : {e}")
 
 if __name__ == "__main__":
     main()

@@ -324,5 +324,66 @@ class TestLigneDeCommande(Base):
                 hm.main(["mettre-a-jour", "--base", self.chemin])
 
 
+class TestVentEtRayonnementStockes(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.base = os.path.join(self.dir, "meteo.sqlite3")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def ligne(self, h=0, vent=None, ray=None, temp=10.0):
+        t = datetime(2026, 6, 1, h, tzinfo=UTC)
+        return {"time": t.strftime(hm.FORMAT), "temperature_2m": temp, "relative_humidity_2m": 80.0, "dew_point_2m": 6.0,
+                "precipitation": 0.0, "wind_speed_10m": vent, "shortwave_radiation": ray}
+
+    def test_une_base_creee_avant_l_ajout_est_migree_sans_perte(self):
+        c = sqlite3.connect(self.base)
+        c.executescript("""CREATE TABLE meteo_horaire (position TEXT NOT NULL, t TEXT NOT NULL, temperature_2m REAL,
+            relative_humidity_2m REAL, dew_point_2m REAL, precipitation REAL, source TEXT NOT NULL, maj TEXT NOT NULL,
+            PRIMARY KEY (position, t)) WITHOUT ROWID;""")
+        c.execute("INSERT INTO meteo_horaire VALUES ('49.25_3.96','2026-06-01T00:00',11.5,70.0,5.0,0.4,'import','2026-10-01T00:00')")
+        c.commit(); c.close()
+        h = hm.Historique(self.base)                                              # ouverture : migration
+        serie = h.serie(LAT, LON, 2026)
+        self.assertEqual(len(serie), 1)
+        self.assertEqual((serie[0]["temperature_2m"], serie[0]["precipitation"]), (11.5, 0.4))     # l'existant est intact
+        self.assertEqual((serie[0]["wind_speed_10m"], serie[0]["shortwave_radiation"]), (None, None))
+        hm.Historique(self.base)                                                  # une seconde ouverture ne refait pas la migration
+        self.assertEqual(len(hm.Historique(self.base).serie(LAT, LON, 2026)), 1)
+
+    def test_un_import_a_six_colonnes_stocke_le_vent_et_le_rayonnement(self):
+        h = hm.Historique(self.base)
+        h.importer_lignes(LAT, LON, [self.ligne(0, vent=3.1, ray=0.0), self.ligne(12, vent=5.4, ray=820.0)], date(2026, 6, 1), MAINTENANT)
+        s = {r["time"]: r for r in h.serie(LAT, LON, 2026)}
+        self.assertEqual((s["2026-06-01T00:00"]["wind_speed_10m"], s["2026-06-01T12:00"]["shortwave_radiation"]), (3.1, 820.0))
+
+    def test_reimporter_un_ancien_csv_n_efface_pas_le_vent_deja_stocke(self):
+        h = hm.Historique(self.base)
+        h.importer_lignes(LAT, LON, [self.ligne(0, vent=3.1, ray=250.0)], date(2026, 6, 1), MAINTENANT)
+        h.importer_lignes(LAT, LON, [self.ligne(0, vent=None, ray=None, temp=11.0)], date(2026, 6, 1), MAINTENANT)   # CSV à 4 colonnes
+        r = h.serie(LAT, LON, 2026)[0]
+        self.assertEqual(r["temperature_2m"], 11.0)                              # la température est bien mise à jour...
+        self.assertEqual((r["wind_speed_10m"], r["shortwave_radiation"]), (3.1, 250.0))   # ...pas le vent ni le rayonnement
+
+    def test_un_nouveau_vent_remplace_l_ancien(self):
+        h = hm.Historique(self.base)
+        h.importer_lignes(LAT, LON, [self.ligne(0, vent=3.1)], date(2026, 6, 1), MAINTENANT)
+        h.importer_lignes(LAT, LON, [self.ligne(0, vent=4.0)], date(2026, 6, 1), MAINTENANT)
+        self.assertEqual(h.serie(LAT, LON, 2026)[0]["wind_speed_10m"], 4.0)
+
+    def test_une_prevision_n_ecrase_pas_une_ligne_fiable_avec_son_vent(self):
+        h = hm.Historique(self.base)
+        h.importer_lignes(LAT, LON, [self.ligne(0, vent=3.1)], date(2026, 6, 1), MAINTENANT)
+        with h._connexion() as c:
+            h._ecrire(c, h.cle(LAT, LON), {"2026-06-01T00:00": {"temperature_2m": 99.0, "wind_speed_10m": 9.9}}, "prevision", MAINTENANT)
+        r = h.serie(LAT, LON, 2026)[0]
+        self.assertEqual((r["temperature_2m"], r["wind_speed_10m"]), (10.0, 3.1))
+
+    def test_les_appels_restent_a_une_unite_par_quatorze_jours(self):
+        self.assertEqual(hm.estimer_unites(14), 1.0)                              # 6 variables < 10 : aucun surcoût d'appel
+        self.assertEqual(hm.estimer_unites(271), round(271 / 14, 2))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

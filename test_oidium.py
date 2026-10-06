@@ -20,11 +20,15 @@ DEBUT = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
 SANS_PRIMAIRE = {"primaire": {"severite_precedente": 0}}
 
 
-def serie(debut=DEBUT, heures=24 * 40, temp=25.0, hr=85.0, pluie=0.0, regles=None):
-    """Série horaire constante ; regles(h) -> dict de surcharges pour l'heure h."""
+def serie(debut=DEBUT, heures=24 * 40, temp=25.0, hr=85.0, pluie=0.0, regles=None, vent=None, rayonnement=None):
+    """Série horaire constante ; regles(h) -> dict de surcharges pour l'heure h. vent (m/s à 10 m) et rayonnement (W/m²) sont facultatifs."""
     rows = []
     for h in range(heures):
         r = {"t": debut + h * H, "temp": temp, "hr": hr, "pluie": pluie, "rosee": None, "mouille": None}
+        if vent is not None:
+            r["vent"] = vent
+        if rayonnement is not None:
+            r["rayonnement"] = rayonnement
         if regles:
             r.update(regles(h) or {})
         rows.append(r)
@@ -283,6 +287,333 @@ class TestSorties(unittest.TestCase):
         self.assertEqual(repr(oi.PARAMS), avant)
 
 
+class TestVent(unittest.TestCase):
+    P = oi.PARAMS
+
+    def test_taux_de_dispersion_de_willocquet(self):
+        f = lambda u: oi.taux_dispersion(u, self.P)                                     # noqa: E731
+        self.assertAlmostEqual(f(0), 0.0043, delta=0.0005)
+        self.assertAlmostEqual(f(10), 0.218, delta=0.01)                               # figure H du mémoire : ≈ 0,22 à 10 m/s
+        self.assertEqual((f(17), f(25)), (1.0, 1.0))                                    # saturé vers 16-17 m/s
+        valeurs = [f(u / 2) for u in range(0, 40)]
+        self.assertTrue(all(b >= a - 1e-12 for a, b in zip(valeurs, valeurs[1:])))
+
+    def test_liberation_horaire_rapportee_a_la_vitesse_de_reference(self):
+        ref = self.P["vent"]["liberation_horaire_ref"]
+        self.assertEqual(oi.liberation_horaire(None, self.P), ref)                      # vent inconnu : valeur de référence
+        self.assertAlmostEqual(oi.liberation_horaire(4.0, self.P), ref, places=9)      # 4 m/s à 10 m = 2 m/s dans le feuillage = référence
+        self.assertLess(oi.liberation_horaire(0.0, self.P), ref)
+        self.assertGreater(oi.liberation_horaire(10.0, self.P), 3 * ref)
+        pv = self.P["vent"]
+        self.assertAlmostEqual(oi.liberation_horaire(60.0, self.P), pv["liberation_horaire_ref"] * pv["facteur_max"])   # plafond du rapport
+        fort = mp.fusionner(self.P, {"vent": {"liberation_horaire_ref": 0.2}})
+        self.assertEqual(oi.liberation_horaire(60.0, fort), 1.0)                        # et jamais plus de 100 % par heure
+        self.assertEqual(oi.liberation_horaire(-3.0, self.P), oi.liberation_horaire(0.0, self.P))
+
+    def run_(self, vitesse, **extra):
+        return simuler(serie(temp=25, hr=85, heures=24 * 60, vent=vitesse), infections_initiales=graine(), **extra)
+
+    def test_sans_donnee_de_vent_le_moteur_est_inchange(self):
+        sans = self.run_(None)
+        desactive = self.run_(10.0, vent={"actif": False})                              # des données, mais le vent est désactivé
+        self.assertFalse(sans["donnees"]["vent_actif"])
+        self.assertFalse(desactive["donnees"]["vent_actif"])
+        self.assertEqual([d["fraction_malade"] for d in sans["jours"]], [d["fraction_malade"] for d in desactive["jours"]])
+
+    def test_le_vent_est_detecte_et_rapporte(self):
+        res = self.run_(4.0)
+        self.assertEqual((res["donnees"]["vent_pct"], res["donnees"]["vent_actif"]), (100, True))
+        self.assertEqual(res["jours"][5]["vent_moy_ms"], 4.0)
+        self.assertAlmostEqual(res["jours"][5]["liberation_pct"], 100 * self.P["vent"]["liberation_horaire_ref"], delta=0.05)
+
+    def test_plus_de_vent_epidemie_plus_rapide(self):
+        calme, venteux = self.run_(0.5), self.run_(10.0)
+        self.assertLess(venteux["jalons"]["fraction_10_pct"], calme["jalons"].get("fraction_10_pct", "9999"))
+
+    def test_le_vent_ne_cree_pas_d_epidemie_sans_colonie_sporulante(self):
+        res = simuler(serie(temp=25, hr=85, heures=24 * 30, vent=15.0))                 # ni primaire ni amorçage
+        self.assertEqual(res["cohortes"], [])
+
+    def test_vent_partiel_avertit_et_les_autres_heures_restent_neutres(self):
+        res = simuler(serie(temp=25, heures=24 * 20, regles=lambda h: {"vent": 8.0} if h < 24 * 10 else {}),
+                      infections_initiales=graine())
+        self.assertEqual(res["donnees"]["vent_pct"], 50)
+        self.assertTrue(any("vent renseigné pour 50 %" in a for a in res["avertissements"]))
+        self.assertIsNone(res["jours"][15]["vent_moy_ms"])                              # pas de donnée : pas de moyenne inventée
+
+
+class TestUV(unittest.TestCase):
+    P = oi.PARAMS
+
+    def test_exposition(self):
+        e = lambda r: oi.exposition_uv(r, self.P)                                       # noqa: E731
+        self.assertEqual((e(None), e(0.0), e(-5.0)), (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(e(800.0), 0.5)                                           # plein soleil : la moitié du feuillage est exposée
+        self.assertAlmostEqual(e(400.0), 0.25)
+        self.assertAlmostEqual(e(1600.0), 0.5)                                          # borné
+
+    def test_les_uv_reduisent_la_favorabilite_et_l_infection(self):
+        base = oi.potentiel_horaire(25, 80, False, self.P)
+        plein = oi.potentiel_horaire(25, 80, False, self.P, uv=0.5)
+        self.assertAlmostEqual(plein / base, 1 - 0.6 * 0.5, places=9)                   # -30 % à plein soleil sur la moitié du feuillage
+        self.assertAlmostEqual(oi.probabilite_infection(25, 80, False, self.P, 0.5) / oi.probabilite_infection(25, 80, False, self.P),
+                               0.7, places=9)
+
+    def run_(self, rayonnement, **extra):
+        return simuler(serie(temp=25, hr=85, heures=24 * 60, rayonnement=rayonnement), infections_initiales=graine(), **extra)
+
+    def test_sans_rayonnement_les_uv_sont_inactifs(self):
+        sans = simuler(serie(temp=25, hr=85, heures=24 * 30), infections_initiales=graine())
+        desactive = self.run_(800.0, uv={"actif": False})
+        self.assertFalse(sans["donnees"]["uv_actif"])
+        self.assertFalse(desactive["donnees"]["uv_actif"])
+        self.assertEqual(sans["jours"][10]["potentiel_pct"], desactive["jours"][10]["potentiel_pct"])
+
+    def test_le_rayonnement_baisse_l_indice_du_jour(self):
+        nuit, soleil = self.run_(0.0), self.run_(800.0)
+        self.assertTrue(soleil["donnees"]["uv_actif"])
+        self.assertAlmostEqual(soleil["jours"][10]["potentiel_pct"] / nuit["jours"][10]["potentiel_pct"], 0.7, delta=0.01)
+        self.assertEqual(soleil["jours"][10]["rayonnement_moy_wm2"], 800.0)
+
+    def test_les_uv_ralentissent_l_epidemie(self):
+        nuit, soleil = self.run_(0.0), self.run_(800.0)
+        self.assertLess(nuit["jalons"]["fraction_10_pct"], soleil["jalons"].get("fraction_10_pct", "9999"))
+
+    def test_la_mortalite_des_conidies_agit_seule(self):
+        """Sans réduction de l'infection, les UV ralentissent encore l'épidémie en tuant des conidies (sur les colonies et dans l'air)."""
+        nuit = self.run_(0.0, uv={"reduction_infection": 0.0})
+        soleil = self.run_(800.0, uv={"reduction_infection": 0.0})
+        self.assertEqual(nuit["jours"][10]["potentiel_pct"], soleil["jours"][10]["potentiel_pct"])      # la favorabilité n'est plus touchée
+        self.assertLess(nuit["jalons"]["fraction_10_pct"], soleil["jalons"].get("fraction_10_pct", "9999"))
+
+    def test_la_reduction_de_l_infection_agit_seule(self):
+        nuit = self.run_(0.0, uv={"mortalite_horaire": 0.0})
+        soleil = self.run_(800.0, uv={"mortalite_horaire": 0.0})
+        self.assertLess(nuit["jalons"]["fraction_10_pct"], soleil["jalons"].get("fraction_10_pct", "9999"))
+
+    def test_les_uv_n_agissent_que_le_jour(self):
+        rayon = lambda h: {"rayonnement": 800.0 if 8 <= (h % 24) < 18 else 0.0}         # noqa: E731
+        res = simuler(serie(temp=25, hr=85, heures=24 * 5, regles=rayon))
+        # moyenne journalière entre « jamais d'UV » (100 %) et « toujours » (70 %) : 10 h de soleil sur 24
+        sans = simuler(serie(temp=25, hr=85, heures=24 * 5))
+        rapport = res["jours"][2]["potentiel_pct"] / sans["jours"][2]["potentiel_pct"]
+        self.assertAlmostEqual(rapport, 1 - 0.3 * 10 / 24, delta=0.01)
+
+    def test_rayonnement_partiel_avertit(self):
+        res = simuler(serie(temp=25, heures=24 * 10, regles=lambda h: {"rayonnement": 500.0} if h < 24 * 4 else {}))
+        self.assertTrue(any("rayonnement renseigné pour 40 %" in a for a in res["avertissements"]))
+
+
+class TestPhenologieDansLeMoteur(unittest.TestCase):
+    DEB = datetime(2026, 3, 28, tzinfo=UTC)
+    PRIM = {"debourrement": "2026-03-29", "severite_precedente": 0}
+
+    def serie_longue(self, jours=170, **kw):
+        return serie(debut=self.DEB, heures=24 * jours, temp=20.0, hr=80.0, **kw)
+
+    def run_(self, rows=None, seed="2026-04-01T00:00", **extra):
+        extra.setdefault("primaire", self.PRIM)
+        return oi.calculer_saison(rows or self.serie_longue(), {**({"infections_initiales": graine(seed)} if seed else {}), **extra},
+                                  now=datetime(2026, 12, 1, tzinfo=UTC))
+
+    def test_activation_automatique_quand_la_serie_couvre_le_debourrement(self):
+        res = self.run_()
+        self.assertTrue(res["phenologie"]["actif"])
+        self.assertEqual(res["phenologie"]["calendrier"]["7-8 feuilles étalées"], "2026-04-09")     # 120 DJC à 10 DJC par jour
+        self.assertEqual(res["phenologie"]["calendrier"]["débourrement"], "2026-03-29")
+
+    def test_inactive_si_la_serie_commence_apres_le_debourrement(self):
+        res = simuler(serie(heures=24 * 10), infections_initiales=graine())              # série du 01/06, débourrement par défaut le 15/04
+        self.assertFalse(res["phenologie"]["actif"])
+        self.assertEqual((res["phenologie"]["calendrier"], res["phenologie"]["fenetre_grappes"]), ({}, [None, None]))
+        self.assertFalse(any("phénologie" in a for a in res["avertissements"]))         # pas d'avertissement quand elle est « automatique »
+        self.assertIsNone(res["jours"][3]["bbch"])
+        self.assertIsNone(res["jours"][3]["indice_grappes_pct"])
+
+    def test_forcer_la_phenologie_sans_donnees_avertit(self):
+        res = oi.calculer_saison(serie(heures=24 * 10), {"phenologie": {"actif": True}, "primaire": {"severite_precedente": 0}})
+        self.assertFalse(res["phenologie"]["actif"])
+        self.assertTrue(any("phénologie indisponible" in a for a in res["avertissements"]))
+
+    def test_la_phenologie_peut_etre_desactivee(self):
+        res = self.run_(phenologie={"actif": False})
+        self.assertFalse(res["phenologie"]["actif"])
+        self.assertTrue(all(d["bbch"] is None for d in res["jours"]))
+
+    def test_avant_le_debourrement_aucun_stade(self):
+        rows = serie(debut=datetime(2026, 3, 20, tzinfo=UTC), heures=24 * 30, temp=20.0, hr=80.0)
+        res = self.run_(rows, seed=None, primaire={"debourrement": "2026-03-28", "severite_precedente": 0})
+        jours = {d["date"]: d for d in res["jours"]}
+        self.assertIsNone(jours["2026-03-25"]["bbch"])
+        self.assertIsNotNone(jours["2026-03-29"]["bbch"])
+
+    def test_la_surface_foliaire_change_la_fraction_atteinte_pas_le_nombre_de_colonies(self):
+        """Au 10/04 (stade 17, surface foliaire ≈ 30 %), les colonies sont encore bien trop peu nombreuses (une dizaine) pour être limitées
+        par la place : leur nombre est le même qu'avec une surface constante, mais elles couvrent une fraction du feuillage
+        1 / surface foliaire fois plus grande (≈ 3 fois)."""
+        avec = self.run_(seed="2026-04-01T00:00")
+        sans = self.run_(seed="2026-04-01T00:00", phenologie={"actif": False})
+        j_avec = {d["date"]: d for d in avec["jours"]}["2026-04-10"]
+        j_sans = {d["date"]: d for d in sans["jours"]}["2026-04-10"]
+        lai = oi.phen.surface_foliaire(j_avec["bbch"])
+        self.assertAlmostEqual(j_avec["fraction_malade"] * 1000.0 * lai, j_sans["fraction_malade"] * 1000.0, delta=0.5)   # même nombre de colonies
+        self.assertAlmostEqual(j_avec["fraction_malade"] / j_sans["fraction_malade"], 1.0 / lai, delta=0.15 / lai)
+        self.assertGreater(j_avec["fraction_malade"], 2 * j_sans["fraction_malade"])
+        self.assertLessEqual(j_avec["fraction_malade"], 1.0)
+
+    def test_la_surface_foliaire_plafonne_l_epidemie_quand_la_place_manque(self):
+        """Avec un amorçage très fort au tout début (stade 09-11, surface foliaire ≈ 2 %), la place devient limitante : le nombre de colonies
+        reste inférieur à ce qu'il serait avec une surface constante."""
+        fort = {"infections_initiales": [{"t": "2026-03-30T00:00", "n": 5.0}]}
+        avec = self.run_(seed=None, **fort)
+        sans = self.run_(seed=None, phenologie={"actif": False}, **fort)
+        j = lambda r: {d["date"]: d for d in r["jours"]}["2026-04-08"]                  # noqa: E731
+        colonies_avec = j(avec)["fraction_malade"] * 1000.0 * oi.phen.surface_foliaire(j(avec)["bbch"])
+        colonies_sans = j(sans)["fraction_malade"] * 1000.0
+        self.assertLess(colonies_avec, colonies_sans)
+
+    def test_un_gel_reduit_la_surface_foliaire_maximale(self):
+        normal = self.run_(seed="2026-04-01T00:00")
+        gele = self.run_(seed="2026-04-01T00:00", phenologie={"surface_foliaire_max": 0.5})
+        f = lambda r: {d["date"]: d["fraction_malade"] for d in r["jours"]}["2026-04-20"]     # noqa: E731
+        self.assertGreater(f(gele), f(normal))
+
+    def test_sensibilite_des_feuilles_en_fin_de_saison(self):
+        """À 20 °C constants, la maturité (1 250 DJC) est atteinte vers le 01/08 : la sensibilité des feuilles y vaut 0,5."""
+        graine_tardive = "2026-08-10T00:00"
+        avec = self.run_(seed=graine_tardive)
+        sans = self.run_(seed=graine_tardive, phenologie={"sensibilite_feuilles": False})
+        self.assertEqual({d["date"]: d["sens_feuilles"] for d in avec["jours"]}["2026-08-15"], 0.5)
+        n = lambda r: sum(d["nouvelles_colonies"] for d in r["jours"] if "2026-08-17" <= d["date"] <= "2026-08-25")   # noqa: E731
+        self.assertGreater(n(sans), 0)
+        self.assertAlmostEqual(n(avec) / n(sans), 0.5, delta=0.1)
+
+    def test_une_infection_primaire_tardive_subit_la_sensibilite_des_feuilles(self):
+        """Fenêtre primaire allongée à 200 jours : une pluie au stade 89 (feuilles à 50 % de sensibilité) crée moitié moins de colonies."""
+        h0 = (datetime(2026, 8, 12, 8, tzinfo=UTC) - self.DEB) // H
+        rows = self.serie_longue(regles=lambda h: {"pluie": 3.0} if h == h0 else {})
+        prim = {"debourrement": "2026-03-29", "severite_precedente": 3, "fenetre_jours": 200}
+        avec = self.run_(rows, seed=None, primaire=prim)
+        sans = self.run_(rows, seed=None, primaire=prim, phenologie={"sensibilite_feuilles": False})
+        self.assertEqual(len(avec["primaires"]), 1)
+        self.assertAlmostEqual(avec["primaires"][0]["colonies"] / sans["primaires"][0]["colonies"], 0.5, delta=0.02)
+
+    def test_indice_grappes_suit_la_resistance_ontogenique(self):
+        res = self.run_(seed=None)
+        j = {d["date"]: d for d in res["jours"]}
+        self.assertEqual(j["2026-04-05"]["indice_grappes_pct"], 0.0)                    # avant les inflorescences : pas de grappe
+        self.assertEqual(j["2026-04-30"]["sens_grappes"], 1.0)                          # pleine floraison (320 DJC)
+        self.assertEqual(j["2026-04-30"]["indice_grappes_pct"], j["2026-04-30"]["potentiel_pct"])
+        tard = j["2026-06-25"]                                                          # après la fermeture de la grappe
+        self.assertLessEqual(tard["sens_grappes"], 0.2)
+        self.assertAlmostEqual(tard["indice_grappes_pct"] / tard["potentiel_pct"], tard["sens_grappes"], delta=0.02)
+
+    def test_fenetre_de_reception_des_grappes(self):
+        res = self.run_(seed=None)
+        debut, fin = res["phenologie"]["fenetre_grappes"]
+        self.assertLess(debut, fin)
+        self.assertEqual(debut, "2026-04-12")                                           # BBCH 53 (150 DJC) : sensibilité 0,5
+        self.assertLessEqual(fin, "2026-06-15")                                         # bien avant la fermeture de la grappe
+
+    def test_indice_grappes_7_jours_est_une_moyenne_glissante(self):
+        res = self.run_(seed=None)
+        j = res["jours"]
+        i = next(k for k, d in enumerate(j) if d["date"] == "2026-05-10")
+        attendu = sum(x["indice_grappes_pct"] for x in j[i - 6: i + 1]) / 7
+        self.assertAlmostEqual(j[i]["indice_grappes_7j"], attendu, delta=0.1)
+
+    def test_les_observations_de_stade_recalent_le_calendrier(self):
+        res = self.run_(seed=None, phenologie={"observations": {"2026-04-17": 65}})
+        self.assertAlmostEqual({d["date"]: d["bbch"] for d in res["jours"]}["2026-04-17"], 65.0, delta=0.1)
+        self.assertLessEqual(res["phenologie"]["calendrier"]["pleine floraison"], "2026-04-17")
+        defaut = self.run_(seed=None)
+        self.assertLess(res["phenologie"]["calendrier"]["pleine floraison"], defaut["phenologie"]["calendrier"]["pleine floraison"])
+
+    def test_observation_hors_serie_leve_une_erreur(self):
+        with self.assertRaises(ValueError):
+            self.run_(seed=None, phenologie={"observations": {"2026-02-01": 11}})
+
+    def test_table_personnalisee(self):
+        table = [[9, 0], [17, 50], [65, 100], [89, 200]]
+        res = self.run_(seed=None, phenologie={"table_djc": table})
+        self.assertEqual(res["phenologie"]["calendrier"]["pleine floraison"], "2026-04-07")            # 100 DJC = 10 jours
+
+    def test_les_parametres_d_origine_restent_intacts(self):
+        avant = repr(oi.PARAMS)
+        self.run_(seed=None, phenologie={"observations": {"2026-04-17": 65}}, vent={"facteur_canopee": 0.9}, uv={"part_exposee": 1.0})
+        self.assertEqual(repr(oi.PARAMS), avant)
+
+
+class TestDonneesExternesEnLigneDeCommande(unittest.TestCase):
+    def csv_complet(self, d, vent=True, jours=170):
+        chemin = os.path.join(d, "m.csv")
+        with open(chemin, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"]
+                       + (["wind_speed_10m", "shortwave_radiation"] if vent else []))
+            for r in serie(debut=datetime(2026, 3, 20, tzinfo=UTC), heures=24 * jours, temp=20.0, hr=80.0):
+                w.writerow([r["t"].strftime("%Y-%m-%dT%H:%M"), r["temp"], r["hr"], "", r["pluie"]] + ([4.0, 300.0] if vent else []))
+        return chemin
+
+    def lancer(self, *args):
+        s = io.StringIO()
+        with contextlib.redirect_stdout(s):
+            oi.main(list(args))
+        return s.getvalue()
+
+    def test_calendrier_seul(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_complet(d), "--debourrement", "2026-03-28", "--calendrier")
+        self.assertIn("CALENDRIER PHÉNOLOGIQUE ESTIMÉ", sortie)
+        for stade in ("4 feuilles étalées", "7-8 feuilles étalées", "pleine floraison", "grains de pois", "fermeture de la grappe", "maturité"):
+            self.assertIn(stade, sortie)
+        self.assertIn("grappes réceptives (sensibilité >= 50 %)", sortie)
+        self.assertNotIn("JALONS", sortie)
+
+    def test_simulation_affiche_les_donnees_et_le_stade(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_complet(d), "--debourrement", "2026-03-28", "--indice-oidi", "95", "--pas", "30")
+        self.assertIn("vent : 100 % des heures renseignées (actif)", sortie)
+        self.assertIn("rayonnement : 100 % (UV actifs)", sortie)
+        self.assertIn("phénologie : active", sortie)
+        self.assertIn("BBCH", sortie)
+        self.assertIn("grappes 7 j", sortie)
+
+    def test_options_pour_desactiver_chaque_facteur(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_complet(d), "--debourrement", "2026-03-28", "--sans-vent", "--sans-uv", "--sans-phenologie")
+        self.assertIn("(inactif)", sortie)
+        self.assertIn("UV inactifs", sortie)
+        self.assertIn("phénologie : inactive", sortie)
+
+    def test_ancien_csv_sans_vent_ni_rayonnement(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_complet(d, vent=False), "--debourrement", "2026-03-28")
+        self.assertIn("vent : 0 % des heures renseignées (inactif)", sortie)
+        self.assertIn("phénologie : active", sortie)                                    # la phénologie n'a besoin que de la température
+
+    def test_observations_de_stade(self):
+        with tempfile.TemporaryDirectory() as d:
+            chemin = self.csv_complet(d)
+            sortie = self.lancer(chemin, "--debourrement", "2026-03-28", "--calendrier", "--bbch", "2026-04-17:65")
+        ligne = next(x for x in sortie.splitlines() if "pleine floraison" in x)
+        self.assertLessEqual(ligne.split(":")[1].strip(), "2026-04-17")
+
+    def test_observation_hors_serie_donne_un_message_clair(self):
+        with tempfile.TemporaryDirectory() as d:
+            chemin = self.csv_complet(d)
+            with self.assertRaises(SystemExit) as cm:
+                self.lancer(chemin, "--debourrement", "2026-03-28", "--bbch", "2026-01-05:11")
+        self.assertIn("Erreur", str(cm.exception))
+        self.assertIn("hors de la série", str(cm.exception))
+
+    def test_bbch_mal_forme(self):
+        with tempfile.TemporaryDirectory() as d:
+            chemin = self.csv_complet(d)
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self.lancer(chemin, "--bbch", "2026-04-17")
+
+
 class TestIndiceOidiEnLigneDeCommande(unittest.TestCase):
     def test_option_indice_oidi(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
@@ -362,9 +693,26 @@ class TestADiagnostics(unittest.TestCase):
         tard = oi.analyse_retro(rows, [date(2026, 5, 18)], {"primaire": {"debourrement": "2026-05-10"}})[0]
         self.assertEqual(tard["periode_reference"][0], "2026-05-10")                  # un débourrement tardif décale la référence
 
+    def test_delai_de_detection_decale_la_fenetre_d_infection(self):
+        """Si les symptômes ne sont repérés que `delai` jours après la fin de la latence, les infections à l'origine sont plus anciennes."""
+        rows = self.meteo_en_deux_temps()
+        a0 = oi.analyse_retro(rows, [date(2026, 7, 18)])[0]
+        a5 = oi.analyse_retro(rows, [date(2026, 7, 18)], delai_visible_j=5)[0]
+        self.assertEqual((a0["delai_visible_j"], a5["delai_visible_j"]), (0, 5))
+        self.assertEqual(date.fromisoformat(a0["infections"][0]) - date.fromisoformat(a5["infections"][0]), timedelta(days=5))
+        a12 = oi.analyse_retro(rows, [date(2026, 7, 18)], delai_visible_j=12)[0]
+        self.assertLess(a12["potentiel_moyen_pct"], a0["potentiel_moyen_pct"] - 10)           # la fenêtre rejoint la phase froide
+
+    def test_sensibilite_au_delai(self):
+        s = oi.sensibilite_delai(self.meteo_en_deux_temps(), date(2026, 7, 18), (0, 3, 6, 12))
+        self.assertEqual([x["delai_visible_j"] for x in s], [0, 3, 6, 12])
+        debuts = [x["infections"][0] for x in s]
+        self.assertEqual(debuts, sorted(debuts, reverse=True))                                    # plus le délai est long, plus on remonte
+        self.assertIn("délai 12 j", oi.resume_sensibilite(date(2026, 7, 18), s))
+
     def test_analyse_retro_date_sans_infection_possible(self):
         a = oi.analyse_retro(serie(temp=25.0, heures=24 * 20), [date(2026, 12, 25)])
-        self.assertEqual(a[0], {"observation": "2026-12-25", "infections": None})
+        self.assertEqual(a[0], {"observation": "2026-12-25", "infections": None, "delai_visible_j": 0})
 
     def test_balayage_des_amorcages(self):
         rows = serie(temp=25.0, hr=85.0, heures=24 * 90)
@@ -396,6 +744,8 @@ class TestADiagnostics(unittest.TestCase):
         self.assertIn("symptômes le 2026-07-08 (± 2 j)", sortie)
         self.assertIn("aucune infection de la série n'y conduit", sortie)             # la date du 25/12 est hors série
         self.assertIn("meilleure que", sortie)
+        self.assertIn("SENSIBILITÉ AU DÉLAI DE DÉTECTION", sortie)
+        self.assertIn("délai 5 j", sortie)
         self.assertIn("des jours du 05-01 au 09-30", sortie)                            # la période de référence est affichée
         self.assertIn("BALAYAGE DES AMORÇAGES", sortie)
         self.assertIn("2026-06-08", sortie)

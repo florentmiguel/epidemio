@@ -9,7 +9,8 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | Fichier | Rôle |
 |---|---|
 | `mildiou_primaire.py` | le moteur (primaire **et secondaire**) + ses paramètres (`PARAMS`) + une ligne de commande (le nom du fichier sera changé quand le dépôt accueillera l'oïdium et le botrytis) |
-| `oidium.py` | moteur oïdium v0 : cycle par cohortes (latence, sporulation, conidies, infection) au pas horaire, calcul à rebours des dates d'infection, balayage des amorçages |
+| `oidium.py` | moteur oïdium v1 : cycle par cohortes (latence, sporulation, conidies, infection) au pas horaire, vent, UV, stade phénologique et résistance ontogénique, calcul à rebours des dates d'infection, balayage des amorçages |
+| `phenologie.py` | stade BBCH par degrés-jours (base 10 °C depuis le débourrement), calage sur stades observés, surface foliaire, résistance ontogénique des feuilles et des grappes |
 | `historique_meteo.py` | historique météo horaire **local** (SQLite) : ne télécharge que les jours manquants, importe et exporte des CSV, compte les appels Open-Meteo |
 | `recuperer_meteo_horaire.py` | télécharge la météo horaire d'une position (Open-Meteo) → CSV (validé sur le VPS) |
 | `exporter_plasmopy.py` | convertit meteo.csv au format d'entrée de Plasmopy (témoin de comparaison) |
@@ -20,7 +21,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 264 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 347 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -92,8 +93,8 @@ le moteur simule donc la **dynamique de l'épidémie** par cohortes, et non des 
   adapté du modèle SOV de l'IFV, qui s'appuie sur la météo des deux années précédentes) : tendance du potentiel épidémique de l'année, non
   un modèle journalier. `--indice-oidi 95` l'utilise comme stock d'ascospores de départ (hypothèse v0 : stock = indice / 100, **à caler**) et
   remplace `--severite`. Ses équations ne sont pas publiques.
-* **Pas dans la v0** : vent, ultraviolets, croissance de la vigne (surface foliaire constante), résistance ontogénique des grappes,
-  cléistothèces en détail, traitements (comme pour le mildiou, le moteur évalue le danger indépendamment des traitements).
+* **Pas dans le moteur** : cléistothèces en détail, effet du gel sur le feuillage (paramètre `phenologie.surface_foliaire_max`),
+  traitements (comme pour le mildiou, le moteur évalue le danger indépendamment des traitements).
 * **Unités relatives** : une capacité d'accueil fixe l'échelle ; seuls les rythmes et les dates ont un sens avant calage. Le mémoire est un
   prototype **non validé** sur des observations de terrain.
 
@@ -110,6 +111,62 @@ Le débourrement par défaut est le 15 avril : à préciser avec `--debourrement
 **Vérité terrain 2026 (clients, Champagne, sous programme phytosanitaire)** : débourrement le **28 mars** ; indice Oïdi de sortie d'hiver **95/100** (« élevé », BSV n°1 du 7 avril 2026), mais projections d'ascospores très faibles et localisées observées au vignoble et 38 % des bourgeons détruits par le gel ; premiers symptômes d'oïdium vers le **20 juillet**, puis vers
 le **6 août**, puis explosion début **septembre**. Elle se juge sur le rappel (les périodes d'infection doivent être favorables), non sur
 les fausses alertes, la protection pouvant retarder ou masquer les symptômes.
+
+### Facteurs externes (v1) : vent, ultraviolets, stade phénologique, résistance ontogénique
+Tous facultatifs et **neutres quand la donnée manque** (sans vent ni rayonnement dans le CSV, et sur une série qui ne couvre pas le
+débourrement, le moteur se comporte exactement comme avant). Leurs paramètres sont des **hypothèses de travail**, non calées.
+
+* **Vent** (Eq. 18 du mémoire, d'après Willocquet et al. 1998) : les conidies s'accumulent sur les colonies, perdent 1 % de viabilité par
+  heure, et ne sont libérées que par le vent. La libération est rapportée à une vitesse de référence (4 m/s à 10 m, soit 2 m/s dans le
+  feuillage : facteur 0,5) : de 47 % des conidies qui partent au calme à 98 % par grand vent, 67 % à la référence. `c_emit` n'a donc pas
+  exactement le même sens avec et sans vent.
+* **Ultraviolets** (Austin et Wilcox 2010) : le rayonnement global (W/m²) sert de proxy. À plein soleil (800 W/m²), la moitié du feuillage
+  est exposée : les conidies y meurent à 12 % par heure et l'infection comme la favorabilité baissent de 60 %, soit -30 % au total.
+* **Phénologie** : stade BBCH estimé en degrés-jours (DJC, moyenne journalière, base 10 °C) cumulés depuis le débourrement ; table
+  ancrée sur ton référentiel (maturité à **1 250 DJC**). Contrôle fait avec les températures réelles de 2026 : 1 250 DJC sont atteints
+  le **23 août**, comme l'estimation vendanges. Les seuils intermédiaires sont des approximations à recaler sur tes relevés de stade :
+  `--bbch 2026-05-15:17 2026-06-12:65 ...` remplace les seuils par ceux observés et garde la table cohérente.
+* **Résistance ontogénique** (Gadoury et al. 2003 ; VitiMeteo-Oidium ; BSV Champagne : risque maximal de « 7-8 feuilles » à « grains de
+  pois ») : sensibilité des **grappes** maximale de la floraison à la nouaison, 60 % aux grains de pois, 20 % à la fermeture de la grappe,
+  10 % ensuite ; sensibilité des **feuilles** douce en fin de saison (50 % à la maturité). Le moteur sort un **indice grappes**
+  (favorabilité × sensibilité) et la fenêtre de réceptivité des grappes (sensibilité >= 50 %).
+* **Surface foliaire** : la capacité d'accueil des colonies suit la surface foliaire relative (2 % au débourrement, 100 % à la fermeture
+  de la grappe). Au début de saison, quelques colonies couvrent donc une fraction du feuillage bien plus grande.
+
+**Obtenir le vent et le rayonnement** (les CSV et la base existants restent valables ; la base SQLite est migrée à l'ouverture, sans perte) :
+```bash
+python3 recuperer_meteo_horaire.py --lat 49.25 --lon 3.96 --sortie meteo6.csv --verifier   # une fois : ≈ 20 unités d'appel (archive)
+python3 historique_meteo.py importer meteo6.csv --lat 49.25 --lon 3.96 --jusqu-a 2026-10-01 # remplit la base ; un ancien CSV n'efface rien
+python3 oidium.py meteo6.csv --debourrement 2026-03-28 --calendrier                         # calendrier phénologique estimé
+python3 oidium.py meteo6.csv --debourrement 2026-03-28 --indice-oidi 95 --pas 7            # simulation complète
+python3 oidium.py meteo6.csv --debourrement 2026-03-28 --indice-oidi 95 --sans-vent --sans-uv   # pour mesurer l'effet de chaque facteur
+```
+Options : `--sans-vent`, `--sans-uv`, `--sans-phenologie`, `--bbch DATE:STADE ...`, `--calendrier`. Sans accès à l'archive (plan sans API
+historique), seuls les 92 derniers jours de vent et de rayonnement sont disponibles : le moteur le signale et traite les autres heures
+comme neutres. Le pont Pilot ne lit pas encore ces colonnes (le mildiou n'en a pas besoin) : à brancher avec l'oïdium.
+
+### Premiers résultats 2026 (v0, non calé ; Reims, indice Oïdi 95, débourrement 28 mars)
+* **Simulation complète** : 11 infections primaires, dont **une seule en avril** (11/04) et cinq du 2 au 10 mai, ce qui est cohérent avec les
+  projections d'ascospores « très faibles et localisées » observées au printemps. Premiers symptômes repérables le 11/06, 10 % du feuillage le
+  24/06, 50 % le 04/07. **Beaucoup trop précoce et explosif par rapport aux observations** (premiers symptômes le 20/07) : attendu, car le
+  moteur ne simule pas les traitements et l'émission de conidies n'est pas calée. Les valeurs absolues de « feuillage atteint » n'ont
+  aucun sens avant calage sur des parcelles non traitées ; seuls les rythmes et la favorabilité relative en ont.
+* **Indice sur 7 jours** : maximum des points hebdomadaires affichés le 3 septembre (45 %), minimum le 16 juillet (14 %).
+* **À rebours** (tolérance 4 j, délai de détection 0) :
+  | symptômes observés | infections correspondantes | favorabilité | rang (1er mai - 30 sept.) |
+  |---|---|---|---|
+  | 20 juillet | 8 au 16 juillet | 15,9 % | meilleure que 11 % des jours |
+  | 6 août | 26 juillet au 2 août | 30,8 % | 48 % |
+  | début septembre (3/09) | 22 au 30 août | 43,1 % | 78 % |
+
+  L'explosion de début septembre est **soutenue par la météo** ; le 6 août est plausible ; le 20 juillet n'est **pas expliqué** à délai 0
+  (infections reconstituées parmi les jours les moins favorables). Piste : les colonies ne sont repérables que quelques jours après la fin de
+  la latence (`--delai`), ou les symptômes proviennent d'infections plus anciennes restées masquées (traitements). À tester avec la
+  sensibilité au délai, que `--retro` affiche désormais.
+
+```bash
+python3 oidium.py meteo.csv --debourrement 2026-03-28 --retro 2026-07-20 2026-08-06 2026-09-03 --tolerance 4 --delai 3
+```
 
 ## Infections secondaires (v0)
 **Vocabulaire : trois étapes à ne pas confondre.**
