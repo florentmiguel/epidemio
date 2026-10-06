@@ -561,13 +561,18 @@ class TestDonneesExternesEnLigneDeCommande(unittest.TestCase):
             oi.main(list(args))
         return s.getvalue()
 
-    def test_calendrier_seul(self):
+    def test_calendrier_compare_les_deux_modeles(self):
         with tempfile.TemporaryDirectory() as d:
             sortie = self.lancer(self.csv_complet(d), "--debourrement", "2026-03-28", "--calendrier")
-        self.assertIn("CALENDRIER PHÉNOLOGIQUE ESTIMÉ", sortie)
-        for stade in ("4 feuilles étalées", "7-8 feuilles étalées", "pleine floraison", "grains de pois", "fermeture de la grappe", "maturité"):
+        self.assertIn("COMPARAISON DES DEUX MODÈLES DE PHÉNOLOGIE", sortie)
+        self.assertIn("table DJC", sortie)
+        self.assertIn("BRIN + GFV", sortie)
+        for stade in ("4 feuilles étalées", "7-8 feuilles étalées", "9 feuilles étalées", "pleine floraison", "grains de pois",
+                      "fermeture de la grappe"):
             self.assertIn(stade, sortie)
-        self.assertIn("grappes réceptives (sensibilité >= 50 %)", sortie)
+        self.assertIn("grappes réceptives", sortie)
+        self.assertIn("débourrement utilisé : 2026-03-28 | calculé par BRIN :", sortie)
+        self.assertIn("feuilles : phyllochrone 24.0 °C·j, base 10 °C", sortie)
         self.assertNotIn("JALONS", sortie)
 
     def test_simulation_affiche_les_donnees_et_le_stade(self):
@@ -593,11 +598,21 @@ class TestDonneesExternesEnLigneDeCommande(unittest.TestCase):
         self.assertIn("phénologie : active", sortie)                                    # la phénologie n'a besoin que de la température
 
     def test_observations_de_stade(self):
+        """Le calendrier DJC est recalé sur l'observation ; BRIN + GFV, qui n'atteint 9 feuilles que le 18/04, la juge incompatible : la
+        comparaison l'affiche au lieu de s'arrêter."""
         with tempfile.TemporaryDirectory() as d:
             chemin = self.csv_complet(d)
             sortie = self.lancer(chemin, "--debourrement", "2026-03-28", "--calendrier", "--bbch", "2026-04-17:65")
-        ligne = next(x for x in sortie.splitlines() if "pleine floraison" in x)
-        self.assertLessEqual(ligne.split(":")[1].strip(), "2026-04-17")
+        ligne = next(x for x in sortie.splitlines() if x.strip().startswith("pleine floraison"))
+        self.assertLessEqual(ligne.split()[2], "2026-04-17")                            # colonne « table DJC »
+        self.assertIn("BRIN + GFV : observations incompatibles avec le modèle", sortie)
+
+    def test_observations_compatibles_recalent_les_deux_modeles(self):
+        with tempfile.TemporaryDirectory() as d:
+            chemin = self.csv_complet(d)
+            sortie = self.lancer(chemin, "--debourrement", "2026-03-28", "--calendrier", "--bbch", "2026-05-20:65")
+        ligne = next(x for x in sortie.splitlines() if x.strip().startswith("pleine floraison"))
+        self.assertEqual(ligne.split()[2:4], ["2026-05-20", "2026-05-20"])                # les deux modèles retrouvent la date observée
 
     def test_observation_hors_serie_donne_un_message_clair(self):
         with tempfile.TemporaryDirectory() as d:
@@ -612,6 +627,220 @@ class TestDonneesExternesEnLigneDeCommande(unittest.TestCase):
             chemin = self.csv_complet(d)
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 self.lancer(chemin, "--bbch", "2026-04-17")
+
+
+class TestPhenologieBrinGfvDansLeMoteur(unittest.TestCase):
+    DEB = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def rows(self, jours=273, temp=20.0, **kw):
+        return serie(debut=self.DEB, heures=24 * jours, temp=temp, hr=80.0, **kw)
+
+    def run_(self, rows=None, **extra):
+        return oi.calculer_saison(rows or self.rows(), {"primaire": {"severite_precedente": 0, **extra.pop("primaire", {})}, **extra},
+                                  now=datetime(2026, 12, 1, tzinfo=UTC))
+
+    def test_le_modele_par_defaut_reste_la_table_de_degres_jours(self):
+        res = self.run_(primaire={"debourrement": "2026-03-20"})
+        self.assertEqual(res["phenologie"]["modele"], "djc")
+        self.assertIsNone(res["phenologie"]["brin_gfv"])
+
+    def test_brin_estime_le_debourrement_quand_il_n_est_pas_fourni(self):
+        """À 20 °C constants, BRIN débourre le 19 janvier (15 °C·h par heure : 438 h) ; ce débourrement ouvre la fenêtre primaire."""
+        res = self.run_(phenologie={"modele": "brin_gfv"})
+        self.assertEqual(res["phenologie"]["modele"], "brin_gfv")
+        self.assertEqual(res["debourrement"], "2026-01-19")
+        bg = res["phenologie"]["brin_gfv"]
+        self.assertEqual((bg["debourrement"], bg["debourrement_brin"], bg["dormance"]), ("2026-01-19", "2026-01-19", "supposee_levee"))
+        self.assertIsNone(bg["ecart_brin_j"])
+
+    def test_le_debourrement_observe_prime_et_l_ecart_est_rapporte(self):
+        res = self.run_(phenologie={"modele": "brin_gfv"}, primaire={"debourrement": "2026-03-20"})
+        self.assertEqual(res["debourrement"], "2026-03-20")
+        self.assertEqual(res["phenologie"]["brin_gfv"]["ecart_brin_j"], -60)
+
+    def test_les_stades_viennent_de_l_enchainement_brin_feuilles_gfv(self):
+        res = self.run_(phenologie={"modele": "brin_gfv"}, primaire={"debourrement": "2026-03-20"})
+        cal = res["phenologie"]["calendrier"]
+        self.assertEqual(cal["9 feuilles étalées"], "2026-04-10")                                # 216 °C·j à 10 par jour
+        self.assertEqual(cal["pleine floraison"], "2026-04-30")                                  # somme GFV de 1 220 au 61e jour
+        j = {d["date"]: d for d in res["jours"]}
+        self.assertEqual(j["2026-04-10"]["bbch"], 19.0)
+        self.assertEqual(j["2026-04-30"]["sens_grappes"], 1.0)
+
+    def test_la_resistance_ontogenique_suit_le_stade_du_modele(self):
+        brin = self.run_(phenologie={"modele": "brin_gfv"}, primaire={"debourrement": "2026-03-20"})
+        djc = self.run_(primaire={"debourrement": "2026-03-20"})
+        self.assertNotEqual(brin["phenologie"]["fenetre_grappes"], djc["phenologie"]["fenetre_grappes"])      # deux calendriers, deux fenêtres
+        d1, d2 = brin["phenologie"]["fenetre_grappes"]
+        self.assertLess(d1, d2)
+
+    def test_les_observations_de_stade_recalent_le_modele(self):
+        res = self.run_(phenologie={"modele": "brin_gfv", "observations": {"2026-04-20": 65}}, primaire={"debourrement": "2026-03-20"})
+        self.assertAlmostEqual({d["date"]: d["bbch"] for d in res["jours"]}["2026-04-20"], 65.0, delta=0.1)
+        self.assertEqual(res["phenologie"]["brin_gfv"]["seuils_gfv"]["f_star"], 1020.0)
+
+    def test_observation_incoherente_leve_une_erreur(self):
+        with self.assertRaises(ValueError):
+            self.run_(phenologie={"modele": "brin_gfv", "observations": {"2026-03-25": 65}}, primaire={"debourrement": "2026-03-20"})
+
+    def test_parametres_du_modele_surcharges(self):
+        res = self.run_(phenologie={"modele": "brin_gfv", "brin_gfv": {"feuilles": {"phyllochron": 48.0}}},
+                        primaire={"debourrement": "2026-03-20"})
+        self.assertEqual(res["phenologie"]["calendrier"]["9 feuilles étalées"], "2026-05-02")
+
+    def test_une_saison_qui_part_d_aout_garde_la_bonne_annee(self):
+        import math
+
+        def temp(h):
+            t = datetime(2025, 8, 1, tzinfo=UTC) + h * H
+            return 11.0 - 9.0 * math.cos(2 * math.pi * (t.timetuple().tm_yday - 20) / 365.0)
+        rows = serie(debut=datetime(2025, 8, 1, tzinfo=UTC), heures=24 * 427, regles=lambda h: {"temp": temp(h)})
+        res = oi.calculer_saison(rows, {"phenologie": {"modele": "brin_gfv"}, "primaire": {"severite_precedente": 0}},
+                                 now=datetime(2026, 12, 1, tzinfo=UTC))
+        self.assertEqual(res["phenologie"]["brin_gfv"]["dormance"], "calculee")
+        self.assertTrue("2026-03-01" <= res["debourrement"] <= "2026-05-15", res["debourrement"])
+        self.assertTrue(res["phenologie"]["actif"])
+
+    def test_repli_signale_quand_brin_gfv_est_impossible(self):
+        rows = serie(debut=datetime(2026, 4, 1, tzinfo=UTC), heures=24 * 60, temp=20.0, hr=80.0)       # la série commence après le débourrement
+        res = oi.calculer_saison(rows, {"phenologie": {"modele": "brin_gfv"}, "primaire": {"debourrement": "2026-03-28", "severite_precedente": 0}})
+        self.assertFalse(res["phenologie"]["actif"])
+        self.assertTrue(any("BRIN + GFV indisponible" in a for a in res["avertissements"]))
+
+    def test_repli_effectif_sur_la_table_de_degres_jours_quand_brin_ne_debourre_pas(self):
+        """2 °C toute l'année : BRIN ne débourre jamais. Le moteur retombe sur la table de degrés-jours depuis le débourrement par défaut
+        (15/04) et le dit : sans cet avertissement, on lirait un calendrier DJC en croyant lire BRIN + GFV."""
+        res = self.run_(self.rows(jours=273, temp=2.0), phenologie={"modele": "brin_gfv"})
+        self.assertTrue(res["phenologie"]["actif"])
+        self.assertEqual(res["phenologie"]["modele"], "djc")
+        self.assertIsNone(res["phenologie"]["brin_gfv"])
+        self.assertEqual(res["debourrement"], "2026-04-15")
+        self.assertTrue(any("phénologie par degrés-jours à la place" in a for a in res["avertissements"]))
+
+    def test_les_avertissements_du_modele_remontent(self):
+        res = self.run_(phenologie={"modele": "brin_gfv"})
+        self.assertTrue(any("dormance supposée levée" in a for a in res["avertissements"]))
+
+    def test_phenologie_desactivee_desactive_aussi_brin_gfv(self):
+        res = self.run_(phenologie={"modele": "brin_gfv", "actif": False}, primaire={"debourrement": "2026-03-20"})
+        self.assertFalse(res["phenologie"]["actif"])
+        self.assertEqual(res["debourrement"], "2026-03-20")
+
+    def test_les_parametres_d_origine_restent_intacts(self):
+        avant = repr(oi.PARAMS)
+        self.run_(phenologie={"modele": "brin_gfv", "brin_gfv": {"gfv": {"f_star": 900.0}}}, primaire={"debourrement": "2026-03-20"})
+        self.assertEqual(repr(oi.PARAMS), avant)
+
+
+class TestBrinGfvEnLigneDeCommande(unittest.TestCase):
+    def csv_(self, d):
+        chemin = os.path.join(d, "m.csv")
+        with open(chemin, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"])
+            for r in serie(debut=datetime(2026, 1, 1, tzinfo=UTC), heures=24 * 200, temp=20.0, hr=80.0):
+                w.writerow([r["t"].strftime("%Y-%m-%dT%H:%M"), r["temp"], r["hr"], "", r["pluie"]])
+        return chemin
+
+    def lancer(self, *args):
+        s = io.StringIO()
+        with contextlib.redirect_stdout(s):
+            oi.main(list(args))
+        return s.getvalue()
+
+    def test_simulation_avec_brin_gfv(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--phenologie", "brin_gfv", "--debourrement", "2026-03-20", "--pas", "60")
+        self.assertIn("BRIN -> croissance des feuilles -> GFV", sortie)
+        self.assertIn("débourrement utilisé : 2026-03-20 | calculé par BRIN : 2026-01-19 (écart BRIN - utilisé : -60 j)", sortie)
+        self.assertIn("GFV (somme base 0 °C depuis le 1er mars)", sortie)
+
+    def test_sans_debourrement_fourni_brin_decide(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--phenologie", "brin_gfv", "--pas", "60")
+        self.assertIn("débourrement : 2026-01-19", sortie)
+
+    def test_le_modele_par_defaut_est_la_table_de_degres_jours(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--debourrement", "2026-03-20", "--pas", "60")
+        self.assertIn("degrés-jours base 10 depuis le débourrement", sortie)
+        self.assertNotIn("BRIN -> croissance", sortie)
+
+
+class TestStadesObservesEnLigneDeCommande(unittest.TestCase):
+    """Série à 20 °C constants : la table DJC atteint BBCH 65 à 320 DJC (20/04 pour un débourrement le 20/03), BRIN + GFV à 1 217 de somme (30/04)."""
+
+    def csv_(self, d):
+        chemin = os.path.join(d, "m.csv")
+        with open(chemin, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"])
+            for r in serie(debut=datetime(2026, 1, 1, tzinfo=UTC), heures=24 * 200, temp=20.0, hr=80.0):
+                w.writerow([r["t"].strftime("%Y-%m-%dT%H:%M"), r["temp"], r["hr"], "", r["pluie"]])
+        return chemin
+
+    def stades(self, d, contenu):
+        chemin = os.path.join(d, "stades.csv")
+        with open(chemin, "w", encoding="utf-8") as f:
+            f.write(contenu)
+        return chemin
+
+    def lancer(self, *args):
+        s = io.StringIO()
+        with contextlib.redirect_stdout(s):
+            oi.main(list(args))
+        return s.getvalue()
+
+    def test_le_fichier_de_stades_affiche_le_biais_des_modeles_par_defaut(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--debourrement", "2026-03-20", "--calendrier",
+                                 "--stades", self.stades(d, "date,bbch\n2026-04-10,65\n"))
+        self.assertIn("ÉCART DES MODÈLES PAR DÉFAUT À TES STADES OBSERVÉS", sortie)
+        ligne = next(x for x in sortie.splitlines() if x.strip().startswith("2026-04-10"))
+        self.assertEqual(ligne.split()[1:], ["65", "+10", "+20"])                      # DJC : 20/04 ; BRIN + GFV : 30/04
+        self.assertIn("table DJC", sortie)
+        self.assertIn("écart moyen +10.0 j", sortie)
+        self.assertIn("écart moyen +20.0 j", sortie)
+        self.assertIn("RECALÉS SUR TES STADES", sortie)
+
+    def test_apres_recalage_le_stade_observe_est_atteint_a_la_date_observee(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--debourrement", "2026-03-20", "--calendrier",
+                                 "--stades", self.stades(d, "2026-04-25,65\n"))
+        ligne = next(x for x in sortie.splitlines() if x.strip().startswith("pleine floraison"))
+        self.assertEqual(ligne.split()[2:4], ["2026-04-25", "2026-04-25"])
+
+    def test_sans_stades_pas_de_tableau_d_ecarts(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--debourrement", "2026-03-20", "--calendrier")
+        self.assertNotIn("ÉCART DES MODÈLES PAR DÉFAUT", sortie)
+
+    def test_stades_et_bbch_se_cumulent(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--debourrement", "2026-03-20", "--calendrier",
+                                 "--stades", self.stades(d, "2026-04-10,65\n"), "--bbch", "2026-05-20:75")
+        lignes = [x.split()[:2] for x in sortie.splitlines()]                          # lignes du tableau d'écarts : « date  BBCH ... »
+        self.assertIn(["2026-04-10", "65"], lignes)                                     # venu du fichier
+        self.assertIn(["2026-05-20", "75"], lignes)                                     # venu de --bbch
+
+    def test_fichier_de_stades_illisible_donne_un_message_clair(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as cm:
+                self.lancer(self.csv_(d), "--stades", self.stades(d, "2026-04-10,beaucoup\n"))
+        self.assertIn("Erreur", str(cm.exception))
+        self.assertIn("stade illisible", str(cm.exception))
+
+    def test_fichier_de_stades_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as cm:
+                self.lancer(self.csv_(d), "--stades", os.path.join(d, "absent.csv"))
+        self.assertIn("Erreur", str(cm.exception))
+
+    def test_la_simulation_utilise_les_stades_observes(self):
+        with tempfile.TemporaryDirectory() as d:
+            sortie = self.lancer(self.csv_(d), "--phenologie", "brin_gfv", "--debourrement", "2026-03-20", "--pas", "60",
+                                 "--stades", self.stades(d, "2026-04-05,12\n2026-04-12,14\n2026-04-20,16\n2026-04-28,18\n"))
+        self.assertIn("ajustés sur tes stades de feuilles", sortie)
 
 
 class TestIndiceOidiEnLigneDeCommande(unittest.TestCase):

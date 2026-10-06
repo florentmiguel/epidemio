@@ -19,7 +19,7 @@ Sert au moteur oïdium (oidium.py) : l'oïdium ne menace pas les mêmes organes 
     en fin d'été.
   * SURFACE FOLIAIRE relative (0 à 1) : tissu sain disponible pour les colonies.
 
-Les stades sont des nombres de l'échelle BBCH rangés dans l'ordre du temps : 09, 11, 13, 14, 15, 17, 53, 57, 61, 65, 71, 75, 77, 79, 81,
+Les stades sont des nombres de l'échelle BBCH rangés dans l'ordre du temps : 09, 11, 13, 14, 15, 17, 19, 53, 57, 61, 65, 71, 75, 77, 79, 81,
 83, 85, 89 (la croissance des feuilles puis celle des inflorescences et des baies suivent la même suite croissante).
 """
 from __future__ import annotations
@@ -37,6 +37,7 @@ TABLE_DJC = (
     (14, 60.0),    # 4 feuilles étalées : début de prise en compte du risque (BSV Champagne)
     (15, 80.0),
     (17, 120.0),   # 7-8 feuilles étalées
+    (19, 135.0),   # 9 feuilles étalées : relais du modèle GFV dans phenologie_brin_gfv.py
     (53, 150.0),   # inflorescences visibles
     (57, 215.0),   # boutons floraux séparés
     (61, 270.0),   # début de floraison
@@ -58,12 +59,12 @@ SENSIBILITE_GRAPPES = (
 )
 SENSIBILITE_FEUILLES = ((9, 1.0), (79, 1.0), (81, 0.9), (85, 0.7), (89, 0.5))
 SURFACE_FOLIAIRE = (
-    (9, 0.01), (11, 0.04), (13, 0.10), (15, 0.20), (17, 0.30), (53, 0.40), (57, 0.55),
+    (9, 0.01), (11, 0.04), (13, 0.10), (15, 0.20), (17, 0.30), (19, 0.36), (53, 0.40), (57, 0.55),
     (61, 0.70), (71, 0.85), (75, 0.95), (79, 1.0), (89, 1.0),
 )
 
 STADES_CLES = (
-    ("débourrement", 9), ("4 feuilles étalées", 14), ("7-8 feuilles étalées", 17), ("début de floraison", 61),
+    ("débourrement", 9), ("4 feuilles étalées", 14), ("7-8 feuilles étalées", 17), ("9 feuilles étalées", 19), ("début de floraison", 61),
     ("pleine floraison", 65), ("nouaison", 71), ("grains de pois", 75), ("fermeture de la grappe", 79),
     ("début de véraison", 81), ("maturité", 89),
 )
@@ -125,6 +126,19 @@ def calage_table(table, observations_djc: dict) -> tuple:
     for a1, a2 in zip(anc, anc[1:]):
         if pts[a2] < pts[a1]:
             raise ValueError(f"observations incohérentes : le stade {a2} ({pts[a2]:.0f} DJC) précède le stade {a1} ({pts[a1]:.0f} DJC)")
+    # un stade non observé situé ENTRE deux stades observés garde sa position relative de la table par défaut, comprimée entre eux : la table
+    # suit ainsi les observations sans reprendre ses valeurs absolues (qui feraient des paliers ou des sauts)
+    par_defaut = dict(table)
+    for s in stades:
+        if s in ancres or s not in par_defaut:
+            continue
+        bas = [a for a in anc if a < s and a in par_defaut]
+        haut = [a for a in anc if a > s and a in par_defaut]
+        if bas and haut:
+            a, b = bas[-1], haut[0]
+            d_a, d_b = par_defaut[a], par_defaut[b]
+            if d_b > d_a:
+                pts[s] = pts[a] + (par_defaut[s] - d_a) / (d_b - d_a) * (pts[b] - pts[a])
     vals = [pts[s] for s in stades]
     for i in range(1, len(stades)):                               # un stade non observé n'est jamais en deçà du précédent
         if stades[i] not in ancres:
@@ -151,6 +165,49 @@ def serie_bbch(rows: list[dict], debourrement: date, tz: ZoneInfo, observations:
             obs[float(stade) if float(stade) != int(stade) else int(stade)] = djc[jour]
         table = calage_table(table, obs)
     return {j: bbch_depuis_djc(v, table) for j, v in djc.items()}
+
+
+def lire_stades(chemin: str) -> dict:
+    """Stades observés : CSV « date,bbch[,note] » (en-tête facultatif, lignes « # ... » ignorées). Un stade peut être une fourchette « 57-60 »
+    (la moyenne est prise) ; la virgule décimale est acceptée. Retourne {date ISO: BBCH}."""
+    import csv
+    out = {}
+    with open(chemin, newline="", encoding="utf-8") as f:
+        for no, ligne in enumerate(csv.reader(f), start=1):
+            if not ligne or not ligne[0].strip() or ligne[0].lstrip().startswith("#"):
+                continue
+            if ligne[0].strip().lower() == "date":
+                continue
+            if len(ligne) < 2:
+                raise ValueError(f"{chemin}, ligne {no} : attendu « date,bbch »")
+            try:
+                jour = date.fromisoformat(ligne[0].strip())
+            except ValueError:
+                raise ValueError(f"{chemin}, ligne {no} : date illisible « {ligne[0].strip()} » (format AAAA-MM-JJ)") from None
+            brut = ligne[1].strip().replace(",", ".")
+            try:
+                valeurs = [float(x) for x in brut.split("-")] if brut.count("-") == 1 else [float(brut)]
+            except ValueError:
+                raise ValueError(f"{chemin}, ligne {no} : stade illisible « {ligne[1].strip()} »") from None
+            stade = sum(valeurs) / len(valeurs)
+            out[jour.isoformat()] = int(stade) if stade == int(stade) else stade
+    return out
+
+
+def ecarts_observations(bbch_jour: dict, observations: dict) -> list[dict]:
+    """Pour chaque stade observé : premier jour où le modèle l'atteint et écart en jours (positif = le modèle est en RETARD sur l'observation)."""
+    out = []
+    for jour, stade in sorted((_j(k), v) for k, v in observations.items()):
+        if stade <= 9:
+            continue
+        atteint = next((j for j in sorted(bbch_jour) if bbch_jour[j] >= stade - 1e-9), None)
+        out.append({"date": jour.isoformat(), "bbch": stade, "modele": atteint.isoformat() if atteint else None,
+                    "ecart_j": (atteint - jour).days if atteint else None})
+    return out
+
+
+def _j(x) -> date:
+    return date.fromisoformat(x) if isinstance(x, str) else x
 
 
 def sens_grappes(bbch: float | None) -> float:

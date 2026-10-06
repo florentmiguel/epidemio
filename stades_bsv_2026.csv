@@ -1,0 +1,20 @@
+# Stades phénologiques 2026 relevés dans les BSV (Champagne). À +/- quelques jours selon les secteurs : les BSV sont hebdomadaires et moyennent
+# des parcelles précoces et tardives. Les fourchettes sont prises au milieu (57 à 60 -> 58,5 ; 68 à 71 -> 69,5 ; 7/8 feuilles -> BBCH 17,5).
+date,bbch,note
+2026-04-07,11,1 feuille étalée
+2026-04-14,13,3 feuilles
+2026-04-22,15,5 feuilles
+2026-04-29,16,6 feuilles
+2026-05-05,17.5,7/8 feuilles
+2026-05-12,19,9/10 feuilles
+2026-05-19,53,
+2026-05-26,58.5,BBCH 57 à 60
+2026-05-30,65,pleine fleur tous cépages
+2026-06-02,69.5,BBCH 68 à 71
+2026-06-09,73,
+2026-06-16,75,
+2026-06-23,77,
+2026-07-07,79,
+2026-07-23,81,
+2026-08-05,85,
+2026-08-15,89,date moyenne de début des vendanges

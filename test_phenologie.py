@@ -207,5 +207,82 @@ class TestCalendrierEtFenetre(unittest.TestCase):
         self.assertEqual(ph.fenetre(self.b, lambda x: 0.0, 0.5), (None, None))
 
 
+class TestDeformationEntreStadesObserves(unittest.TestCase):
+    def test_un_stade_entre_deux_observes_garde_sa_position_relative(self):
+        """65 observé à 200 DJC et 79 à 500 : le stade 71 (400 DJC dans la table, entre 320 et 760) se place à la même fraction de l'intervalle
+        observé : 200 + (400 - 320) / (760 - 320) × (500 - 200) = 254,5. Sans cela il garderait 400 : un palier puis un saut."""
+        t = dict(ph.calage_table(ph.TABLE_DJC, {65: 200.0, 79: 500.0}))
+        self.assertAlmostEqual(t[71], 200.0 + 80.0 / 440.0 * 300.0, places=6)
+        self.assertAlmostEqual(t[75], 200.0 + 250.0 / 440.0 * 300.0, places=6)
+        djc = [d for _, d in sorted(t.items())]
+        self.assertTrue(all(b >= a for a, b in zip(djc, djc[1:])))
+
+    def test_les_stades_hors_des_observations_gardent_l_ancien_comportement(self):
+        t = dict(ph.calage_table(ph.TABLE_DJC, {65: 200.0, 79: 500.0}))
+        self.assertEqual(t[17], 120.0)                                                   # avant la première observation : inchangé
+        self.assertGreaterEqual(t[89], 500.0)                                            # après la dernière : jamais en deçà
+
+    def test_une_serie_complete_d_observations_est_reproduite(self):
+        rows = serie(date(2026, 3, 20), 120, 20.0)
+        obs = {"2026-04-05": 15, "2026-04-20": 53, "2026-05-05": 65, "2026-05-25": 75, "2026-06-15": 79}
+        b = ph.serie_bbch(rows, date(2026, 3, 20), TZ, observations=obs)
+        for j, s in obs.items():
+            self.assertAlmostEqual(b[date.fromisoformat(j)], float(s), delta=0.1)
+        v = [b[j] for j in sorted(b)]
+        self.assertTrue(all(y >= x - 1e-9 for x, y in zip(v, v[1:])))
+
+
+class TestLectureDesStades(unittest.TestCase):
+    def ecrire(self, texte):
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8")
+        f.write(texte)
+        f.close()
+        self.addCleanup(lambda: __import__("os").unlink(f.name))
+        return f.name
+
+    def test_lecture_nominale(self):
+        r = ph.lire_stades(self.ecrire("date,bbch,note\n2026-04-07,11,1 feuille\n2026-05-26,57-60,BSV\n2026-06-02,68-71\n"))
+        self.assertEqual(r, {"2026-04-07": 11, "2026-05-26": 58.5, "2026-06-02": 69.5})
+
+    def test_en_tete_commentaires_lignes_vides_et_virgule_decimale(self):
+        r = ph.lire_stades(self.ecrire("# stades du BSV\n\ndate,bbch\n2026-05-05,\"17,5\"\n  \n2026-05-12,19\n"))
+        self.assertEqual(r, {"2026-05-05": 17.5, "2026-05-12": 19})
+
+    def test_sans_en_tete(self):
+        self.assertEqual(ph.lire_stades(self.ecrire("2026-05-12,19\n")), {"2026-05-12": 19})
+
+    def test_erreurs_precises(self):
+        for contenu, attendu in (("2026-13-45,19\n", "ligne 1 : date illisible"), ("2026-05-12\n", "attendu « date,bbch »"),
+                                 ("date,bbch\n2026-05-12,beaucoup\n", "ligne 2 : stade illisible")):
+            with self.assertRaises(ValueError) as cm:
+                ph.lire_stades(self.ecrire(contenu))
+            self.assertIn(attendu, str(cm.exception))
+
+    def test_fichier_absent(self):
+        with self.assertRaises(OSError):
+            ph.lire_stades("/chemin/qui/n/existe/pas.csv")
+
+
+class TestEcartsAuxObservations(unittest.TestCase):
+    def setUp(self):
+        self.b = ph.serie_bbch(serie(date(2026, 3, 20), 100, 20.0), date(2026, 3, 20), TZ)      # 65 atteint à 320 DJC : 32e jour = 20/04
+
+    def test_ecart_positif_quand_le_modele_est_en_retard(self):
+        e = ph.ecarts_observations(self.b, {"2026-04-10": 65})[0]
+        self.assertEqual((e["modele"], e["ecart_j"]), ("2026-04-20", 10))
+
+    def test_ecart_negatif_quand_le_modele_est_en_avance(self):
+        self.assertEqual(ph.ecarts_observations(self.b, {"2026-05-01": 65})[0]["ecart_j"], -11)
+
+    def test_stade_jamais_atteint(self):
+        e = ph.ecarts_observations(self.b, {"2026-06-01": 89})[0]
+        self.assertEqual((e["modele"], e["ecart_j"]), (None, None))
+
+    def test_le_debourrement_est_ignore_et_l_ordre_est_chronologique(self):
+        e = ph.ecarts_observations(self.b, {"2026-05-01": 65, "2026-03-20": 9, "2026-04-05": 17})
+        self.assertEqual([x["date"] for x in e], ["2026-04-05", "2026-05-01"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

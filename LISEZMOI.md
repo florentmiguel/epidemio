@@ -10,6 +10,8 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 |---|---|
 | `mildiou_primaire.py` | le moteur (primaire **et secondaire**) + ses paramètres (`PARAMS`) + une ligne de commande (le nom du fichier sera changé quand le dépôt accueillera l'oïdium et le botrytis) |
 | `oidium.py` | moteur oïdium v1 : cycle par cohortes (latence, sporulation, conidies, infection) au pas horaire, vent, UV, stade phénologique et résistance ontogénique, calcul à rebours des dates d'infection, balayage des amorçages |
+| `phenologie_brin_gfv.py` | phénologie en chaîne : débourrement par BRIN, croissance des feuilles (temps thermique) jusqu'à 9 feuilles, puis GFV (floraison, véraison) interpolé sur l'échelle BBCH |
+| `stades_bsv_2026.csv` | stades phénologiques 2026 relevés dans les BSV (17 stades, du 07/04 au 15/08) : sert à recaler la phénologie |
 | `phenologie.py` | stade BBCH par degrés-jours (base 10 °C depuis le débourrement), calage sur stades observés, surface foliaire, résistance ontogénique des feuilles et des grappes |
 | `historique_meteo.py` | historique météo horaire **local** (SQLite) : ne télécharge que les jours manquants, importe et exporte des CSV, compte les appels Open-Meteo |
 | `recuperer_meteo_horaire.py` | télécharge la météo horaire d'une position (Open-Meteo) → CSV (validé sur le VPS) |
@@ -21,7 +23,7 @@ sporulation → …). Tout est recalculé depuis le 1er janvier à chaque appel.
 | `lire_plasmopy.py` | résume la table d'événements de Plasmopy (une ligne par chaîne distincte) pour la comparer au moteur |
 | `configurer_plasmopy.py` | applique les réglages de Plasmopy (main.yaml, secrets.yaml) pour la météo horaire |
 | `sensibilite_dispersion.py` | rejoue la saison avec plusieurs critères (dispersion, puis humectation) et les juge contre l'observation de terrain |
-| `test_*.py` | 347 tests (météos synthétiques, une règle par test) |
+| `test_*.py` | 433 tests (météos synthétiques, une règle par test) |
 
 ## Périmètre : le moteur évalue le danger, l'OAD décide
 Le moteur évalue le **risque épidémiologique indépendamment de tout programme phytosanitaire** :
@@ -132,6 +134,61 @@ débourrement, le moteur se comporte exactement comme avant). Leurs paramètres 
   (favorabilité × sensibilité) et la fenêtre de réceptivité des grappes (sensibilité >= 50 %).
 * **Surface foliaire** : la capacité d'accueil des colonies suit la surface foliaire relative (2 % au débourrement, 100 % à la fermeture
   de la grappe). Au début de saison, quelques colonies couvrent donc une fraction du feuillage bien plus grande.
+
+#### Phénologie en chaîne : BRIN -> croissance végétative -> GFV (`phenologie_brin_gfv.py`)
+Un seul modèle ne suit pas toute la saison : on enchaîne trois modèles publiés, chacun là où il est le plus fiable.
+
+| Phase | Modèle | Principe | Paramètres Chardonnay |
+|---|---|---|---|
+| **Débourrement** (BBCH 09) | **BRIN** (García de Cortázar-Atauri et al. 2009) | dormance : froid de Bidabé, `Q10^(-Tmax/10) + Q10^(-Tmin/10)` par jour depuis le 1er août précédent ; puis forçage horaire de Richardson `max(min(T-5, 25-5), 0)` | Q10 = 2,17 ; froid critique 101,2 ; forçage critique 6 576,7 °C·h |
+| **Croissance végétative** (09 à 19) | émission des feuilles linéaire en temps thermique (Lebon et al. 2004) | n feuilles = temps thermique base 10 °C / phyllochrone ; BBCH = 10 + n ; surface foliaire déduite (SFE relative) | phyllochrone ≈ 24 °C·j |
+| **De 9 feuilles à la véraison** (19 à 83) | **GFV** (Parker et al. 2011) | somme (Tmin+Tmax)/2 à base 0 °C depuis le 1er mars ; BBCH interpolé entre 9 feuilles, la floraison (65) et la véraison (83) | floraison 1 217 ; véraison 2 547 |
+
+* **SFE** désigne ici la surface foliaire exposée (Carbonneau 1983) : le modèle fournit sa **dynamique relative** (0 à 1) à partir du nombre de
+  feuilles. Une SFE en m²/m² exigerait la géométrie du palissage (écartement, hauteur et épaisseur du feuillage), non demandée pour l'oïdium.
+* **Dormance** : sans l'été et l'automne précédents dans la série (le CSV part du 1er janvier), elle est **supposée levée** au premier jour et BRIN ne
+  calcule que le forçage ; ses auteurs montrent que la température de base pèse plus que la dormance. Avec une série qui part du 1er août, elle est calculée.
+* **Débourrement observé** : il prime toujours sur le calculé, et l'écart est rapporté. **Observations de stade** (`--bbch DATE:STADE`) : un stade de
+  feuilles (11 à 19) ajuste le phyllochrone ; un stade à partir de 53 remplace le repère GFV (65 -> floraison, 83 -> véraison) ; des observations
+  incompatibles avec l'ordre des stades sont refusées avec un message clair.
+* **Approximations** : paramètres du seul Chardonnay ; la table du froid et du forçage critiques a été calée avec des températures horaires
+  reconstituées à partir de Tmin et Tmax ; les stades intermédiaires (53, 57, 61, 71, 75, 77, 79, 81) sont placés par fractions de l'intervalle ;
+  après la véraison (BBCH 83) le stade reste constant ; l'heure d'été est prise en compte (un jour de 23 h cumule 23/24 d'un jour de temps thermique).
+
+```bash
+python3 oidium.py meteo6.csv --debourrement 2026-03-28 --calendrier                   # compare la table DJC et BRIN + GFV, stade par stade
+python3 oidium.py meteo6.csv --phenologie brin_gfv --debourrement 2026-03-28 --indice-oidi 95   # simulation sur le stade BRIN + GFV
+python3 oidium.py meteo6.csv --phenologie brin_gfv --indice-oidi 95                    # BRIN estime lui-même le débourrement
+python3 oidium.py meteo6.csv --calendrier --bbch 2026-05-12:15 2026-06-10:65          # recale les deux modèles sur tes relevés
+```
+**Comparaison 2026** (températures reconstituées à partir d'un point par semaine : approximatif, à refaire sur le CSV complet). BRIN calcule un
+débourrement au **23 mars**, à 5 jours du 28 mars observé et à 3 jours de la référence CIVC du 20 mars. Les deux modèles, indépendants (table de
+degrés-jours calée sur 1 250 DJC à la maturité ; chaîne BRIN + feuilles + GFV tirée de la littérature), concordent à 0-7 jours près :
+fermeture de la grappe les 14 et 15 juillet, grains de pois les 29 et 30 juin, grappes réceptives du 24 mai au 2 juillet contre du 29 mai au 3 juillet.
+Les stades de feuilles divergent le plus (4 feuilles le 23 contre le 30 avril) : c'est le phyllochrone, à recaler.
+
+#### Recalage sur les stades observés (BSV, relevés)
+`--stades fichier.csv` (format `date,bbch[,note]`, fourchettes « 57-60 » acceptées, lignes `#` ignorées ; cumulable avec `--bbch`) recale les deux modèles
+sur des stades observés. Avec `--calendrier`, la sortie affiche d'abord le **biais des modèles par défaut** (écart en jours à chaque stade observé,
++ = modèle en retard), puis les calendriers recalés et la fenêtre de réceptivité des grappes.
+
+* **Feuilles** : avec au moins 3 stades de feuilles, la **base thermique** et le phyllochrone sont ajustés (grille de bases de 0 à 10 °C ; à erreur égale,
+  la base la plus haute). Les stades entre deux stades observés gardent leur position relative, comprimée entre eux : pas de palier ni de saut.
+* **Prudence** : les stades d'un BSV sont hebdomadaires et moyennent des secteurs précoces et tardifs (±3 à 5 jours). Recaler une saison corrige
+  CETTE saison (suivi en cours de campagne) ; des paramètres durables exigeront plusieurs saisons. Les valeurs de la littérature restent le défaut.
+
+```bash
+python3 oidium.py meteo6.csv --debourrement 2026-03-28 --calendrier --stades stades_bsv_2026.csv
+python3 oidium.py meteo6.csv --phenologie brin_gfv --debourrement 2026-03-28 --stades stades_bsv_2026.csv --indice-oidi 95
+```
+**Résultat 2026** (17 stades du BSV ; températures reconstituées à partir d'un point par semaine : approximatif, à refaire sur le CSV complet) :
+* les deux modèles par défaut sont **en retard** sur les stades observés : table DJC de 8,8 jours en moyenne, BRIN + GFV de 12,1 jours, surtout pour les
+  feuilles (jusqu'à 20 jours) et de la floraison aux grains de pois (13 à 17 jours) ; ils rattrapent à la véraison (3 à 5 jours) ;
+* feuilles : la base de 10 °C de la littérature ajuste mal (erreur de 0,36 feuille) ; l'ajustement donne **une base de 3 °C et un phyllochrone de 46 °C·j**
+  (erreur de 0,22 feuille) ; 9 feuilles le 14 mai (observé : le 12) ;
+* GFV recalé : floraison à **1 068** de somme (littérature : 1 217, soit 12 % de moins) et véraison à **2 538** (littérature : 2 547) ;
+* **fenêtre de réceptivité des grappes (sensibilité >= 50 %) : du 19 mai au 19 juin** d'après les stades observés, au lieu du 24-29 mai au 2-3 juillet des
+  modèles par défaut. Elle ne dépend pas des températures reconstituées : elle vient directement des stades BBCH 53 (19/05) et 75-77 (16-23/06).
 
 **Obtenir le vent et le rayonnement** (les CSV et la base existants restent valables ; la base SQLite est migrée à l'ouverture, sans perte) :
 ```bash

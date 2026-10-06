@@ -26,7 +26,9 @@ Facteurs externes (v1), tous facultatifs et neutres quand la donnée manque :
   * ULTRAVIOLETS (Austin et Wilcox 2010) : le rayonnement global sert de proxy ; il tue une part des conidies (sur les colonies et dans
     l'air) et réduit l'infection, sur la fraction exposée du feuillage seulement ;
   * STADE PHÉNOLOGIQUE et RÉSISTANCE ONTOGÉNIQUE (phenologie.py) : surface foliaire disponible, sensibilité des feuilles, et indice des
-    GRAPPES (favorabilité × sensibilité ontogénique). Le stade vient des degrés-jours depuis le débourrement, recalable sur des observations.
+    GRAPPES (favorabilité × sensibilité ontogénique). Le stade vient, au choix, d'une table de degrés-jours depuis le débourrement (défaut) ou de
+    l'enchaînement BRIN -> croissance des feuilles -> GFV (--phenologie brin_gfv, phenologie_brin_gfv.py) ; dans les deux cas il est
+    recalable sur des observations de stade.
 Les paramètres des trois facteurs sont des HYPOTHÈSES DE TRAVAIL, non calées sur la Champagne.
 
 Ce que le moteur ne fait PAS : conservation hivernale détaillée (cléistothèces), effet du gel sur la surface foliaire (paramètre
@@ -49,6 +51,7 @@ from zoneinfo import ZoneInfo
 
 import mildiou_primaire as mp
 import phenologie as phen
+import phenologie_brin_gfv as pbg
 
 UTC = timezone.utc
 
@@ -112,6 +115,8 @@ PARAMS = {
         "base_djc": 10.0,
         "table_djc": None,                      # [[BBCH, DJC], ...] pour remplacer la table par défaut
         "observations": {},                     # {"2026-05-15": 17, ...} stades observés : recalent la table
+        "modele": "djc",                        # "djc" : table de degrés-jours (défaut) ; "brin_gfv" : BRIN -> feuilles -> GFV (phenologie_brin_gfv.py)
+        "brin_gfv": None,                       # surcharges des paramètres de phenologie_brin_gfv.PARAMS (Chardonnay par défaut)
         "surface_foliaire_max": 1.0,            # < 1 après un gel : la surface foliaire maximale est réduite
         "sensibilite_feuilles": True,
     },
@@ -227,8 +232,21 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
         raise ValueError("série météo vide")
 
     pp, pc, pi_ = p["primaire"], p["conidies"], p["infection"]
-    annee = rows[0]["t"].astimezone(tz).year
-    debourrement = (date.fromisoformat(pp["debourrement"]) if pp["debourrement"] else date(annee, 4, 15))
+    annee = rows[-1]["t"].astimezone(tz).year
+    pf = p["phenologie"]
+    # BRIN + GFV : le débourrement est ESTIMÉ s'il n'est pas fourni ; il sert alors aussi à la fenêtre des infections primaires
+    res_bg = None
+    if pf["modele"] == "brin_gfv" and pf["actif"] is not False:
+        res_bg = pbg.serie_bbch_brin_gfv(rows, tz, annee, pf["brin_gfv"],
+                                         debourrement=date.fromisoformat(pp["debourrement"]) if pp["debourrement"] else None,
+                                         observations=pf["observations"] or None)
+        avert += res_bg["avertissements"]
+    if pp["debourrement"]:
+        debourrement = date.fromisoformat(pp["debourrement"])
+    elif res_bg and res_bg["debourrement"]:
+        debourrement = res_bg["debourrement"]
+    else:
+        debourrement = date(annee, 4, 15)
     fin_primaire = debourrement + timedelta(days=pp["fenetre_jours"])
     stock_asc = pp["stock_selon_severite"].get(pp["severite_precedente"], pp["stock_selon_severite"].get(str(pp["severite_precedente"]), 0.0))
     if pp.get("indice_oidi") is not None:
@@ -237,7 +255,7 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
     capacite = p["capacite_colonies"]
     seuil_vis = p["seuil_visible"] * capacite
     ph = {"humectation": p["humectation"]}
-    pv, pu, pf = p["vent"], p["uv"], p["phenologie"]
+    pv, pu = p["vent"], p["uv"]
 
     # --- données externes : disponibilité et activation (neutres quand la donnée manque) ---
     vent_pct = 100.0 * sum(1 for r in rows if r.get("vent") is not None) / len(rows)
@@ -248,11 +266,16 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
         avert.append(f"vent renseigné pour {vent_pct:.0f} % des heures : les autres reçoivent la libération de référence")
     if uv_actif and ray_pct < 95:
         avert.append(f"rayonnement renseigné pour {ray_pct:.0f} % des heures : les autres sont sans effet des UV")
-    bbch_jour = {}
-    if pf["actif"] is not False:
+    bbch_jour, modele_actif = {}, None
+    if res_bg and res_bg["actif"]:
+        bbch_jour, modele_actif = res_bg["bbch"], "brin_gfv"
+    elif pf["actif"] is not False:
+        if res_bg is not None:
+            avert.append("BRIN + GFV indisponible : phénologie par degrés-jours à la place")
         table = (tuple((float(b) if float(b) != int(b) else int(b), float(d)) for b, d in pf["table_djc"])
                  if pf["table_djc"] else phen.TABLE_DJC)
         bbch_jour = phen.serie_bbch(rows, debourrement, tz, pf["observations"] or None, table, pf["base_djc"])
+        modele_actif = "djc"
         if not bbch_jour and pf["actif"] is True:
             avert.append("phénologie indisponible : la série ne couvre pas le débourrement")
     phen_actif = bool(bbch_jour)
@@ -430,9 +453,15 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
             "stock_ascospores_initial": stock_asc0, "primaires": primaires, "jalons": jalons, "generations": generations,
             "jours": sortie_jours,
             "donnees": {"vent_pct": round(vent_pct), "rayonnement_pct": round(ray_pct), "vent_actif": vent_actif, "uv_actif": uv_actif},
-            "phenologie": {"actif": phen_actif,
+            "phenologie": {"actif": phen_actif, "modele": modele_actif if phen_actif else None,
+                           "bbch_jour": {j.isoformat(): round(v, 3) for j, v in bbch_jour.items()} if phen_actif else {},
                            "calendrier": phen.calendrier(bbch_jour) if phen_actif else {},
-                           "fenetre_grappes": list(phen.fenetre(bbch_jour, phen.sens_grappes, 0.5)) if phen_actif else [None, None]},
+                           "fenetre_grappes": list(phen.fenetre(bbch_jour, phen.sens_grappes, 0.5)) if phen_actif else [None, None],
+                           "brin_gfv": ({k: (v.isoformat() if isinstance(v, date) else v) for k, v in res_bg.items()
+                                         if k in ("debourrement", "debourrement_brin", "ecart_brin_j", "dormance", "neuf_feuilles", "phyllochron",
+                                                  "t_base_feuilles", "rmse_feuilles")}
+                                        | {"seuils_gfv": {k: round(x, 1) for k, x in res_bg["seuils_gfv"].items()}})
+                           if (phen_actif and modele_actif == "brin_gfv") else None},
             "cohortes": [{"id": c.id, "source": c.source, "generation": c.gen, "infection": _iso(c.t_inf), "colonies": round(c.n, 8),
                           "symptomes": _iso(c.t_symp), "fin_sporulation": _iso(c.t_fin)} for c in toutes]}
 
@@ -554,17 +583,104 @@ def resume(res: dict, pas_j: int = 7) -> str:
     return "\n".join(L)
 
 
+def _lignes_brin(bg: dict) -> list[str]:
+    """Détail BRIN + GFV : débourrement utilisé et calculé, dormance, phyllochrone, repères GFV."""
+    dormance = {"calculee": "calculée (froid de Bidabé depuis le 1er août)", "supposee_levee": "supposée levée au début de la série",
+                "non_levee": "jamais levée"}.get(bg["dormance"], bg["dormance"])
+    L = [f"  débourrement utilisé : {bg['debourrement']} | calculé par BRIN : {bg['debourrement_brin'] or 'non atteint'}"
+         + (f" (écart BRIN - utilisé : {bg['ecart_brin_j']:+d} j)" if bg["ecart_brin_j"] is not None else ""),
+         f"  dormance : {dormance} | 9 feuilles : {bg['neuf_feuilles'] or 'non atteint'}",
+         f"  feuilles : phyllochrone {bg['phyllochron']:.1f} °C·j, base {bg['t_base_feuilles']:g} °C"
+         + (f", ajustés sur tes stades de feuilles (erreur moyenne {bg['rmse_feuilles']:.2f} feuille)" if bg.get("rmse_feuilles") is not None
+            else " (valeurs de la littérature, ou phyllochrone seul recalé)")]
+    if bg["seuils_gfv"]:
+        s = bg["seuils_gfv"]
+        L.append(f"  GFV (somme base 0 °C depuis le 1er mars) : 9 feuilles à {s['s19']:.0f} | floraison à {s['f_star']:.0f} | véraison à {s['v_star']:.0f}")
+    return L
+
+
 def resume_calendrier(res: dict) -> str:
-    """Calendrier phénologique estimé (DJC base 10 depuis le débourrement) et fenêtre de réceptivité des grappes."""
+    """Calendrier phénologique estimé et fenêtre de réceptivité des grappes."""
     f = res["phenologie"]
     if not f["actif"]:
         return "PHÉNOLOGIE INACTIVE : la série ne couvre pas le débourrement, ou la phénologie est désactivée."
-    L = [f"CALENDRIER PHÉNOLOGIQUE ESTIMÉ (degrés-jours base 10 depuis le débourrement du {res['debourrement']} ; "
-         "à confronter à tes relevés, puis à recaler avec --bbch DATE:STADE)"]
+    if f["modele"] == "brin_gfv":
+        L = ["CALENDRIER PHÉNOLOGIQUE ESTIMÉ (BRIN -> croissance des feuilles -> GFV ; à confronter à tes relevés, puis à recaler avec --bbch DATE:STADE)"]
+        L += _lignes_brin(f["brin_gfv"])
+    else:
+        L = [f"CALENDRIER PHÉNOLOGIQUE ESTIMÉ (degrés-jours base 10 depuis le débourrement du {res['debourrement']} ; "
+             "à confronter à tes relevés, puis à recaler avec --bbch DATE:STADE)"]
     for nom, jour in f["calendrier"].items():
         L.append(f"  {nom:<26}: {jour or 'non atteint'}")
     d1, d2 = f["fenetre_grappes"]
     L.append(f"  grappes réceptives (sensibilité >= 50 %) : du {d1 or '-'} au {d2 or '-'}")
+    return "\n".join(L)
+
+
+def _sans_observations(surcharge: dict | None) -> dict:
+    import copy
+    s = copy.deepcopy(surcharge or {})
+    s.get("phenologie", {}).pop("observations", None)
+    return s
+
+
+def _ecarts_par_defaut(rows: list[dict], surcharge: dict | None, observations: dict) -> str:
+    """Écart des deux modèles PAR DÉFAUT (sans recalage) à des stades observés : mesure leur biais avant tout calage."""
+    sans = _sans_observations(surcharge)
+    col = {}
+    for nom in ("djc", "brin_gfv"):
+        r = calculer_saison(rows, mp.fusionner(sans, {"phenologie": {"modele": nom, "actif": None}}))
+        f = r["phenologie"]
+        col[nom] = ({e["date"]: e for e in phen.ecarts_observations({date.fromisoformat(k): v for k, v in f["bbch_jour"].items()}, observations)}
+                    if f["actif"] and f["modele"] == nom else {})
+    L = ["ÉCART DES MODÈLES PAR DÉFAUT À TES STADES OBSERVÉS (en jours ; + = le modèle est en RETARD sur l'observation)",
+         f"  {'date':<12}{'BBCH':>6}   {'table DJC':>10}   {'BRIN + GFV':>10}"]
+    for jour in sorted(observations):
+        if observations[jour] <= 9:
+            continue
+        cellules = []
+        for nom in ("djc", "brin_gfv"):
+            e = col[nom].get(jour)
+            cellules.append(f"{e['ecart_j']:+d}" if e and e["ecart_j"] is not None else "-")
+        L.append(f"  {jour:<12}{observations[jour]:>6g}   {cellules[0]:>10}   {cellules[1]:>10}")
+    for nom, etiquette in (("djc", "table DJC"), ("brin_gfv", "BRIN + GFV")):
+        v = [e["ecart_j"] for e in col[nom].values() if e["ecart_j"] is not None]
+        if v:
+            L.append(f"  {etiquette:<12} écart moyen {sum(v) / len(v):+.1f} j | écart absolu moyen {sum(abs(x) for x in v) / len(v):.1f} j | "
+                     f"sur {len(v)} stades")
+    return "\n".join(L)
+
+
+def resume_calendriers_compares(rows: list[dict], surcharge: dict | None = None) -> str:
+    """Les deux modèles de phénologie côte à côte : table de degrés-jours et BRIN + feuilles + GFV. Avec des stades observés, affiche d'abord
+    le biais des modèles par défaut, puis les calendriers recalés sur ces observations."""
+    obs = ((surcharge or {}).get("phenologie") or {}).get("observations") or {}
+    obs = {(k if isinstance(k, str) else k.isoformat()): v for k, v in obs.items()}
+    a = calculer_saison(rows, mp.fusionner(surcharge or {}, {"phenologie": {"modele": "djc", "actif": None}}))
+    try:
+        b = calculer_saison(rows, mp.fusionner(surcharge or {}, {"phenologie": {"modele": "brin_gfv", "actif": None}}))
+        erreur_b = None
+    except ValueError as e:                              # observations de stade incompatibles avec l'enchaînement BRIN + feuilles + GFV
+        b, erreur_b = None, str(e)
+    fa = a["phenologie"]
+    fb = b["phenologie"] if b else {"modele": None, "calendrier": {}, "fenetre_grappes": [None, None]}
+    L = []
+    if obs:
+        L += [_ecarts_par_defaut(rows, surcharge, obs), ""]
+    L.append("COMPARAISON DES DEUX MODÈLES DE PHÉNOLOGIE" + (" RECALÉS SUR TES STADES" if obs else " (à confronter à tes relevés de stade)"))
+    if fb["modele"] == "brin_gfv":
+        L += _lignes_brin(fb["brin_gfv"])
+    elif erreur_b:
+        L.append(f"  BRIN + GFV : observations incompatibles avec le modèle ({erreur_b})")
+    else:
+        L.append("  BRIN + GFV indisponible sur cette série : " + ("; ".join(b["avertissements"]) or "voir les avertissements"))
+    L.append(f"  {'stade':<26}{'table DJC':<14}{'BRIN + GFV':<14}{'écart (j)'}")
+    for nom in fa["calendrier"] or fb["calendrier"]:
+        ja, jb = fa["calendrier"].get(nom), fb["calendrier"].get(nom) if fb["modele"] == "brin_gfv" else None
+        ecart = f"{(date.fromisoformat(jb) - date.fromisoformat(ja)).days:+d}" if ja and jb else ""
+        L.append(f"  {nom:<26}{ja or '-':<14}{jb or '-':<14}{ecart}")
+    ga, gb = fa["fenetre_grappes"], fb["fenetre_grappes"] if fb["modele"] == "brin_gfv" else [None, None]
+    L.append(f"  {'grappes réceptives':<26}{(ga[0] or '-') + ' → ' + (ga[1] or '-')}   |   {(gb[0] or '-') + ' → ' + (gb[1] or '-')}")
     return "\n".join(L)
 
 
@@ -613,7 +729,11 @@ def main(argv=None):
     ap.add_argument("--graine", action="append", default=[], help="amorçage manuel : AAAA-MM-JJ[THH:MM] (répétable)")
     ap.add_argument("--multiplication", type=float, help="émission de conidies par colonie et par jour (calage)")
     ap.add_argument("--bbch", nargs="+", metavar="DATE:STADE", help="stades observés (ex. 2026-05-15:17) : recalent la phénologie")
-    ap.add_argument("--calendrier", action="store_true", help="affiche seulement le calendrier phénologique estimé")
+    ap.add_argument("--stades", metavar="FICHIER", help="fichier CSV « date,bbch[,note] » de stades observés (BSV, relevés) : recale la phénologie")
+    ap.add_argument("--calendrier", action="store_true",
+                    help="compare les deux modèles de phénologie (degrés-jours et BRIN + feuilles + GFV) et s'arrête")
+    ap.add_argument("--phenologie", choices=("djc", "brin_gfv"),
+                    help="modèle de phénologie de la simulation : djc (défaut) ou brin_gfv (débourrement estimé par BRIN si --debourrement manque)")
     ap.add_argument("--sans-vent", action="store_true", help="ignore le vent (compare les scénarios)")
     ap.add_argument("--sans-uv", action="store_true", help="ignore le rayonnement (UV)")
     ap.add_argument("--sans-phenologie", action="store_true", help="ignore le stade, la surface foliaire et la résistance ontogénique")
@@ -631,11 +751,21 @@ def main(argv=None):
         surcharge["uv"]["actif"] = False
     if a.sans_phenologie:
         surcharge["phenologie"]["actif"] = False
+    if a.phenologie:
+        surcharge["phenologie"]["modele"] = a.phenologie
+    observations = {}
+    if a.stades:
+        try:
+            observations.update(phen.lire_stades(a.stades))
+        except (OSError, ValueError) as e:
+            sys.exit(f"Erreur : {e}")
     if a.bbch:
         try:
-            surcharge["phenologie"]["observations"] = {x.split(":")[0]: float(x.split(":")[1]) for x in a.bbch}
+            observations.update({x.split(":")[0]: float(x.split(":")[1]) for x in a.bbch})
         except (IndexError, ValueError):
             ap.error("--bbch attend des paires DATE:STADE, par exemple 2026-05-15:17")
+    if observations:
+        surcharge["phenologie"]["observations"] = observations
     if a.debourrement:
         surcharge["primaire"]["debourrement"] = a.debourrement
     if a.indice_oidi is not None:
@@ -651,7 +781,7 @@ def main(argv=None):
     rows = mp.charger_csv(a.csv)
     try:
         if a.calendrier:
-            print(resume_calendrier(calculer_saison(rows, surcharge)))
+            print(resume_calendriers_compares(rows, surcharge))
         elif a.retro:
             obs = [date.fromisoformat(x) for x in a.retro]
             print(resume_retro(analyse_retro(rows, obs, surcharge, a.tolerance, a.delai), a.tolerance))
