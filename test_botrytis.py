@@ -143,6 +143,41 @@ class TestFormeCorrigee(unittest.TestCase):
         self.assertTrue(0.5 <= sev1 <= 3.0, sev1)
 
 
+class TestFinFenetreEtLienFloraison(unittest.TestCase):
+    def serie(self, annee=2024, t=20.0, hr=95.0):
+        rows, j = [], date(annee, 5, 1)
+        while j <= date(annee, 11, 30):
+            for h in range(24):
+                rows.append({"t": datetime(j.year, j.month, j.day, h, tzinfo=timezone.utc), "temp": t, "hr": hr, "pluie": 0.0})
+            j += timedelta(days=1)
+        return rows
+
+    def bbch(self, annee=2024, j89=None):
+        out, j = {}, date(annee, 5, 1)
+        while j <= date(annee, 11, 30):
+            k = (j - date(annee, 5, 1)).days
+            v = 53 + k * 0.25
+            out[j] = 89.0 if (j89 and j >= j89) else min(85.0, v)
+            j += timedelta(days=1)
+        return out
+
+    def test_fenetre2_bornee_au_1er_octobre_sans_bbch89(self):
+        res = b.calculer_saison(self.serie(), self.bbch(), ZoneInfo("Europe/Paris"))
+        f2 = [d["date"] for d in res["jours"] if d["fenetre"] == "2"]
+        self.assertEqual(max(f2), "2024-10-01")
+
+    def test_fenetre2_fermee_au_premier_jour_bbch89(self):
+        res = b.calculer_saison(self.serie(), self.bbch(j89=date(2024, 8, 20)), ZoneInfo("Europe/Paris"))
+        f2 = [d["date"] for d in res["jours"] if d["fenetre"] == "2"]
+        self.assertEqual(max(f2), "2024-08-20")
+
+    def test_sev3_proportionnel_a_sev1(self):
+        tz = ZoneInfo("Europe/Paris")
+        avec = b.calculer_saison(self.serie(), self.bbch(), tz)
+        sans = b.calculer_saison(self.serie(), self.bbch(), tz, {"lien_floraison": {"actif": False}})
+        self.assertAlmostEqual(avec["sev3"], sans["sev3"] * avec["sev1"] / 1.0, delta=0.02 * sans["sev3"] * avec["sev1"] + 1e-9)
+
+
 class TestInfectionPeriode1(unittest.TestCase):
 
     def test_inf1_analytique(self):
@@ -285,7 +320,7 @@ class TestMoteurComplet(unittest.TestCase):
         self.assertEqual(res["sev3"], 0.0)
 
     def test_sev2_et_sev3_s_accumulent_dans_fenetre_2(self):
-        res = self._run(fenetre=2)
+        res = self._run(fenetre=2, params={"lien_floraison": {"actif": False}})    # mécanique de la fenêtre 2 seule (sans floraison simulée)
         self.assertEqual(res["sev1"], 0.0)
         self.assertGreater(res["sev2"], 0.0)
         self.assertGreater(res["sev3"], 0.0)
@@ -298,8 +333,8 @@ class TestMoteurComplet(unittest.TestCase):
 
     def test_hr_elevee_augmente_sev3(self):
         """HR élevée favorise l'infection de baie à baie (inf3 ~ HR)."""
-        bas = self._run(hr=60.0, fenetre=2)
-        haut = self._run(hr=95.0, fenetre=2)
+        bas = self._run(hr=60.0, fenetre=2, params={"lien_floraison": {"actif": False}})
+        haut = self._run(hr=95.0, fenetre=2, params={"lien_floraison": {"actif": False}})
         self.assertGreater(haut["sev3"], bas["sev3"])
 
     def test_hors_fenetre_sev_restent_nuls(self):

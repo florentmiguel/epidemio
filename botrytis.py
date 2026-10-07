@@ -52,6 +52,13 @@ PARAMS: dict = {
     #   "corrigee" (défaut) : (a × Teq^m × (1 − Teq))^n, terme d'humidité de la sporulation logistique 1 / (1 + e^(b − c·HR + d·HR²))
     #   "imprimee"          : formes de l'article telles qu'imprimées (comparaison)
     "forme": "corrigee",
+    # Fin de la fenêtre 2 : premier jour à BBCH 89, et au plus tard à cette date (MM-JJ). La phénologie en degrés-jours n'atteint pas
+    # BBCH 89 les années fraîches ; sans borne, la fenêtre resterait ouverte jusqu'en décembre.
+    "fin_fenetre2": "10-01",
+    # EXTENSION VITI Sens (hors modèle publié) : l'inoculum de grappe de la fenêtre 2 dépend de la floraison (infections latentes et
+    # débris floraux colonisés). La propagation de baie à baie est multipliée par SEV1 / sev1_ref (sev1_ref = 1,0 : médiane des
+    # floraisons 2012-2025 à Reims, proche de la moyenne publiée des épidémies faibles, 0,94).
+    "lien_floraison": {"actif": True, "sev1_ref": 1.0},
     # Mycelium growth (Eq. 2) — Ciliberti et al. 2014
     "mygr": {"tmin": 0.0, "tmax": 40.0, "a": 3.78, "m": 0.9, "n": 0.475},
     # Sporulation (Eq. 3) — Ciliberti et al. 2015
@@ -289,6 +296,14 @@ def calculer_saison(
     f2_debut = p["fenetre2"]["debut"]
     f2_fin   = p["fenetre2"]["fin"]
 
+    j89 = next((j for j in sorted(bbch_jour) if bbch_jour[j] is not None and bbch_jour[j] >= f2_fin), None)
+    jours_dispo = sorted(par_jour)
+    annee = jours_dispo[-1].year if jours_dispo else None
+    mm, jj = (int(x) for x in p["fin_fenetre2"].split("-"))
+    fin_f2 = date(annee, mm, jj) if annee else None
+    if j89 is not None and fin_f2 is not None:
+        fin_f2 = min(fin_f2, j89)
+    lien = p.get("lien_floraison") or {}
     sev1 = sev2 = sev3 = 0.0
     historique_mygr_spor: list[tuple[float, float]] = []
     jours_out = []
@@ -314,7 +329,7 @@ def calculer_saison(
 
         if bbch_j is not None:
             in_f1 = f1_debut <= bbch_j <= f1_fin
-            in_f2 = f2_debut <= bbch_j <= f2_fin
+            in_f2 = f2_debut <= bbch_j <= f2_fin and (fin_f2 is None or j <= fin_f2)
 
             if in_f1:
                 ris1 = ciso * inf1(t_j, wd_j, bbch_j, p)
@@ -322,6 +337,8 @@ def calculer_saison(
             if in_f2:
                 ris2 = ciso * inf2(t_j, wd_j, bbch_j, p)
                 ris3 = inf3(t_j, hr_j, bbch_j, p) * mg
+                if lien.get("actif"):
+                    ris3 *= sev1 / lien["sev1_ref"]                       # inoculum de grappe issu de la floraison
                 sev2 += ris2
                 sev3 += ris3
 
