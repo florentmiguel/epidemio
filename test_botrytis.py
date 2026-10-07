@@ -166,7 +166,7 @@ class TestFinFenetreEtLienFloraison(unittest.TestCase):
         f2 = [d["date"] for d in res["jours"] if d["fenetre"] == "2"]
         self.assertEqual(max(f2), "2024-10-01")
 
-    def test_fenetre2_fermee_au_premier_jour_bbch89(self):
+    def test_fenetre2_fermee_au_stade_de_vendange(self):
         res = b.calculer_saison(self.serie(), self.bbch(j89=date(2024, 8, 20)), ZoneInfo("Europe/Paris"))
         f2 = [d["date"] for d in res["jours"] if d["fenetre"] == "2"]
         self.assertEqual(max(f2), "2024-08-20")
@@ -179,7 +179,7 @@ class TestFinFenetreEtLienFloraison(unittest.TestCase):
 
 
 class TestSousFenetres(unittest.TestCase):
-    def test_sev2_de_79_a_83_et_sev3_de_84_a_89(self):
+    def test_sev2_de_79_a_83_et_sev3_de_84_a_87(self):
         tz = ZoneInfo("Europe/Paris")
         rows, bbch, j = [], {}, date(2024, 7, 1)
         for k in range(40):
@@ -194,7 +194,7 @@ class TestSousFenetres(unittest.TestCase):
             if d["ris2"] > 0:
                 self.assertTrue(79 <= d["bbch"] <= 83, d)
             if d["ris3"] > 0:
-                self.assertTrue(84 <= d["bbch"] <= 89, d)
+                self.assertTrue(84 <= d["bbch"] <= 87, d)
         self.assertGreater(res["sev2"], 0)
         self.assertGreater(res["sev3"], 0)
 

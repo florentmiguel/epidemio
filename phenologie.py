@@ -129,14 +129,25 @@ def calage_table(table, observations_djc: dict) -> tuple:
     # un stade non observé situé ENTRE deux stades observés garde sa position relative de la table par défaut, comprimée entre eux : la table
     # suit ainsi les observations sans reprendre ses valeurs absolues (qui feraient des paliers ou des sauts)
     par_defaut = dict(table)
+    tb = sorted(table)
+
+    def defaut(stade):
+        """DJC par défaut d'un stade, interpolé dans la table s'il n'y figure pas (ex. BBCH 87 entre 85 et 89)."""
+        if stade in par_defaut:
+            return par_defaut[stade]
+        for (b1, d1), (b2, d2) in zip(tb, tb[1:]):
+            if b1 <= stade <= b2:
+                return d1 + (stade - b1) / (b2 - b1) * (d2 - d1)
+        return None
+
     for s in stades:
         if s in ancres or s not in par_defaut:
             continue
-        bas = [a for a in anc if a < s and a in par_defaut]
-        haut = [a for a in anc if a > s and a in par_defaut]
+        bas = [a for a in anc if a < s and defaut(a) is not None]
+        haut = [a for a in anc if a > s and defaut(a) is not None]
         if bas and haut:
             a, b = bas[-1], haut[0]
-            d_a, d_b = par_defaut[a], par_defaut[b]
+            d_a, d_b = defaut(a), defaut(b)
             if d_b > d_a:
                 pts[s] = pts[a] + (par_defaut[s] - d_a) / (d_b - d_a) * (pts[b] - pts[a])
     vals = [pts[s] for s in stades]

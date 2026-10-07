@@ -52,9 +52,12 @@ PARAMS: dict = {
     #   "corrigee" (défaut) : (a × Teq^m × (1 − Teq))^n, terme d'humidité de la sporulation logistique 1 / (1 + e^(b − c·HR + d·HR²))
     #   "imprimee"          : formes de l'article telles qu'imprimées (comparaison)
     "forme": "corrigee",
-    # Fin de la fenêtre 2 : premier jour à BBCH 89, et au plus tard à cette date (MM-JJ). La phénologie en degrés-jours n'atteint pas
+    # Fin de la fenêtre 2 : premier jour au stade de vendange (stade_vendange), et au plus tard à cette date (MM-JJ). La phénologie en degrés-jours n'atteint pas
     # BBCH 89 les années fraîches ; sans borne, la fenêtre resterait ouverte jusqu'en décembre.
     "fin_fenetre2": "10-01",
+    # Stade de vendange en Champagne : la récolte se fait vers BBCH 86-87 (degré potentiel modéré), pas à la pleine maturité (89).
+    # La fenêtre 2 se ferme au premier jour à ce stade.
+    "stade_vendange": 87.0,
     # EXTENSION VITI Sens (hors modèle publié) : l'inoculum de grappe de la fenêtre 2 dépend de la floraison (infections latentes et
     # débris floraux colonisés). La propagation de baie à baie est multipliée par SEV1 / sev1_ref (sev1_ref = 1,0 : médiane des
     # floraisons 2012-2025 à Reims, proche de la moyenne publiée des épidémies faibles, 0,94).
@@ -81,7 +84,7 @@ PARAMS: dict = {
     # Sous-fenêtres de la fenêtre 2 (CHOIX VITI Sens, l'article fait courir SEV2 et SEV3 sur toute la fenêtre 79-89) :
     #   SEV2 (conidies sur baies) de la fermeture de la grappe au début de la véraison, SEV3 (baie à baie) de la véraison à la récolte.
     "fenetre_sev2": {"debut": 79, "fin": 83},
-    "fenetre_sev3": {"debut": 84, "fin": 89},
+    "fenetre_sev3": {"debut": 84, "fin": 87},
     # WD proxy : seuils pour compter une heure comme « mouillée »
     "wd_proxy": {"hr_seuil": 90.0, "pluie_seuil": 0.2},
     # Coefficients de l'analyse discriminante (Table 6 de González-Domínguez et al. 2015)
@@ -300,7 +303,7 @@ def calculer_saison(
     f2_debut = p["fenetre2"]["debut"]
     f2_fin   = p["fenetre2"]["fin"]
 
-    j89 = next((j for j in sorted(bbch_jour) if bbch_jour[j] is not None and bbch_jour[j] >= f2_fin), None)
+    j89 = next((j for j in sorted(bbch_jour) if bbch_jour[j] is not None and bbch_jour[j] >= p["stade_vendange"]), None)
     jours_dispo = sorted(par_jour)
     annee = jours_dispo[-1].year if jours_dispo else None
     mm, jj = (int(x) for x in p["fin_fenetre2"].split("-"))
