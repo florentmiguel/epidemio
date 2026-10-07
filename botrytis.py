@@ -45,6 +45,13 @@ from zoneinfo import ZoneInfo
 # Paramètres (valeurs publiées dans l'article)
 # ---------------------------------------------------------------------------
 PARAMS: dict = {
+    # Forme des fonctions de température. L'article imprime  a × Teq^m × (1 − Teq)^n ; cette forme donne un optimum de sporulation
+    # à 2,8 °C et une sporulation DÉCROISSANTE avec l'humidité, contraire à l'article source (Ciliberti et al. 2016 : optimum
+    # 15-20 °C, HR > 65,5 %), et des SEV 1 000 fois plus faibles que les moyennes publiées. La forme (a × Teq^m × (1 − Teq))^n,
+    # habituelle dans les modèles de l'équipe Rossi, donne un optimum de sporulation de 16,6 °C et des SEV du bon ordre de grandeur.
+    #   "corrigee" (défaut) : (a × Teq^m × (1 − Teq))^n, terme d'humidité de la sporulation logistique 1 / (1 + e^(b − c·HR + d·HR²))
+    #   "imprimee"          : formes de l'article telles qu'imprimées (comparaison)
+    "forme": "corrigee",
     # Mycelium growth (Eq. 2) — Ciliberti et al. 2014
     "mygr": {"tmin": 0.0, "tmax": 40.0, "a": 3.78, "m": 0.9, "n": 0.475},
     # Sporulation (Eq. 3) — Ciliberti et al. 2015
@@ -96,13 +103,20 @@ def _teq(t: float, tmin: float, tmax: float) -> float:
     return (t - tmin) / (tmax - tmin)
 
 
+def _beta(teq: float, a: float, m: float, n: float, p: dict) -> float:
+    """Réponse à la température : (a·Teq^m·(1−Teq))^n (forme corrigée) ou a·Teq^m·(1−Teq)^n (forme imprimée)."""
+    if p.get("forme", "corrigee") == "imprimee":
+        return a * teq ** m * (1 - teq) ** n
+    return (a * teq ** m * (1 - teq)) ** n
+
+
 def taux_mygr(t: float, mf: float, p: dict) -> float:
     """Taux de croissance mycélienne journalier (Eq. 2). mf = fraction d'heures mouillées (0-1)."""
     pm = p["mygr"]
     teq = _teq(t, pm["tmin"], pm["tmax"])
     if teq <= 0:
         return 0.0
-    return pm["a"] * teq ** pm["m"] * (1 - teq) ** pm["n"] * mf
+    return _beta(teq, pm["a"], pm["m"], pm["n"], p) * mf
 
 
 def taux_spor(t: float, hr: float, p: dict) -> float:
@@ -111,10 +125,13 @@ def taux_spor(t: float, hr: float, p: dict) -> float:
     teq = _teq(t, ps["tmin"], ps["tmax"])
     if teq <= 0:
         return 0.0
-    rh_term = ps["rh_b"] + ps["rh_c"] * hr - ps["rh_d"] * hr ** 2
-    if rh_term <= 0:
-        return 0.0
-    return ps["a"] * teq ** ps["m"] * (1 - teq) ** ps["n"] / rh_term
+    if p.get("forme", "corrigee") == "imprimee":
+        rh_term = ps["rh_b"] + ps["rh_c"] * hr - ps["rh_d"] * hr ** 2
+        if rh_term <= 0:
+            return 0.0
+        return _beta(teq, ps["a"], ps["m"], ps["n"], p) / rh_term
+    f_hr = 1.0 / (1.0 + math.exp(ps["rh_b"] - ps["rh_c"] * hr + ps["rh_d"] * hr ** 2))
+    return _beta(teq, ps["a"], ps["m"], ps["n"], p) * f_hr
 
 
 def ciso_jour(historique_7j: list[tuple[float, float]]) -> float:
@@ -155,7 +172,7 @@ def inf1(t: float, wd: float, bbch: float, p: dict) -> float:
     if teq <= 0:
         return 0.0
     wd_term = 1.0 + math.exp(pi["wd_a"] - pi["wd_b"] * wd)
-    return pi["a"] * teq ** pi["m"] * (1 - teq) ** pi["n"] / wd_term * sus1(bbch)
+    return _beta(teq, pi["a"], pi["m"], pi["n"], p) / wd_term * sus1(bbch)
 
 
 def inf2(t: float, wd: float, bbch: float, p: dict) -> float:
@@ -165,7 +182,7 @@ def inf2(t: float, wd: float, bbch: float, p: dict) -> float:
     if teq <= 0:
         return 0.0
     wd_term = math.exp(-pi["wd_a"] * math.exp(-pi["wd_b"] * wd))
-    return pi["a"] * teq ** pi["m"] * (1 - teq) ** pi["n"] * wd_term * sus2(bbch)
+    return _beta(teq, pi["a"], pi["m"], pi["n"], p) * wd_term * sus2(bbch)
 
 
 def inf3(t: float, hr: float, bbch: float, p: dict) -> float:
@@ -175,7 +192,7 @@ def inf3(t: float, hr: float, bbch: float, p: dict) -> float:
     if teq <= 0:
         return 0.0
     rh_term = 1.0 + math.exp((pi["rh_a"] - pi["rh_b"] * hr) / 100.0)
-    return pi["a"] * teq ** pi["m"] * (1 - teq) ** pi["n"] / rh_term * sus3(bbch)
+    return _beta(teq, pi["a"], pi["m"], pi["n"], p) / rh_term * sus3(bbch)
 
 
 # ---------------------------------------------------------------------------

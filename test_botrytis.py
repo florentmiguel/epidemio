@@ -12,6 +12,7 @@ import botrytis as b
 UTC = timezone.utc
 TZ = ZoneInfo("UTC")
 P = b.PARAMS
+PI = b._fusion(b.PARAMS, {"forme": "imprimee"})       # formes de l'article telles qu'imprimées
 
 
 def serie(debut: date, jours: int, temp=20.0, hr=75.0, pluie=0.0) -> list[dict]:
@@ -40,7 +41,7 @@ class TestFonctionsDeBase(unittest.TestCase):
     def test_taux_mygr_analytique(self):
         """T=20°C, Tmin=0, Tmax=40, Mf=1 : 3.78 × 0.5^0.9 × 0.5^0.475 × 1"""
         attendu = 3.78 * 0.5**0.9 * 0.5**0.475
-        self.assertAlmostEqual(b.taux_mygr(20.0, 1.0, P), attendu, places=6)
+        self.assertAlmostEqual(b.taux_mygr(20.0, 1.0, PI), attendu, places=6)
 
     def test_taux_mygr_nul_hors_plage(self):
         self.assertEqual(b.taux_mygr(0.0, 1.0, P), 0.0)
@@ -57,7 +58,7 @@ class TestFonctionsDeBase(unittest.TestCase):
         teq = 20 / 35
         rh_term = 3.595 + 0.097 * 80 - 0.0005 * 80**2
         attendu = 3.7 * teq**0.9 * (1 - teq)**10.493 / rh_term
-        self.assertAlmostEqual(b.taux_spor(20.0, 80.0, P), attendu, places=8)
+        self.assertAlmostEqual(b.taux_spor(20.0, 80.0, PI), attendu, places=8)
 
     def test_taux_spor_nul_hors_plage(self):
         self.assertEqual(b.taux_spor(0.0, 80.0, P), 0.0)
@@ -111,6 +112,37 @@ class TestSusceptibilite(unittest.TestCase):
         self.assertAlmostEqual(v[-1], 0.9894, delta=0.001)  # 0.0546×89-3.87 = 0.9894 < 1
 
 
+class TestFormeCorrigee(unittest.TestCase):
+    """Forme (a·Teq^m·(1−Teq))^n et humidité logistique : cohérence avec l'article source (Ciliberti et al. 2016)."""
+
+    def test_optimum_sporulation_entre_15_et_20_degres(self):
+        t_opt = max(range(1, 350), key=lambda k: b.taux_spor(k / 10, 85.0, P)) / 10
+        self.assertTrue(15.0 <= t_opt <= 20.0, t_opt)
+
+    def test_forme_imprimee_optimum_aberrant(self):
+        t_opt = max(range(1, 350), key=lambda k: b.taux_spor(k / 10, 85.0, PI)) / 10
+        self.assertLess(t_opt, 5.0)                                   # 2,8 °C : contraire à l'article source
+
+    def test_sporulation_croissante_avec_hr(self):
+        self.assertLess(b.taux_spor(18.0, 40.0, P), b.taux_spor(18.0, 65.0, P))
+        self.assertLess(b.taux_spor(18.0, 65.0, P), b.taux_spor(18.0, 90.0, P))
+
+    def test_mygr_analytique(self):
+        attendu = (3.78 * 0.5 ** 0.9 * 0.5) ** 0.475
+        self.assertAlmostEqual(b.taux_mygr(20.0, 1.0, P), attendu, places=8)
+
+    def test_spor_analytique(self):
+        teq = 20 / 35
+        attendu = (3.7 * teq ** 0.9 * (1 - teq)) ** 10.493 / (1 + math.exp(3.595 - 0.097 * 80 + 0.0005 * 80 ** 2))
+        self.assertAlmostEqual(b.taux_spor(20.0, 80.0, P), attendu, places=8)
+
+    def test_sev1_floraison_type_dans_l_ordre_de_grandeur_publie(self):
+        """30 jours de floraison à 18 °C, 80 % HR, 6 h d'humectation : SEV1 entre 0,5 et 3 (moyennes publiées 0,94 à 2,46)."""
+        mg, sp = b.taux_mygr(18.0, 6 / 24, P), b.taux_spor(18.0, 80.0, P)
+        sev1 = sum(mg * sp * b.inf1(18.0, 6.0, 53 + 20 * k / 30, P) for k in range(30))
+        self.assertTrue(0.5 <= sev1 <= 3.0, sev1)
+
+
 class TestInfectionPeriode1(unittest.TestCase):
 
     def test_inf1_analytique(self):
@@ -118,7 +150,7 @@ class TestInfectionPeriode1(unittest.TestCase):
         teq = 20 / 35
         wd_term = 1.0 + math.exp(1.85 - 0.19 * 12)
         attendu = 3.56 * teq**0.99 * (1 - teq)**0.71 / wd_term * b.sus1(65.0)
-        self.assertAlmostEqual(b.inf1(20.0, 12.0, 65.0, P), attendu, places=8)
+        self.assertAlmostEqual(b.inf1(20.0, 12.0, 65.0, PI), attendu, places=8)
 
     def test_inf1_nul_hors_plage_thermique(self):
         self.assertEqual(b.inf1(0.0, 12.0, 65.0, P), 0.0)
@@ -144,7 +176,7 @@ class TestInfectionPeriode2(unittest.TestCase):
         teq = 20 / 35
         wd_term = math.exp(-2.3 * math.exp(-0.048 * 12))
         attendu = 6.416 * teq**1.292 * (1 - teq)**0.469 * wd_term * b.sus2(83.0)
-        self.assertAlmostEqual(b.inf2(20.0, 12.0, 83.0, P), attendu, places=8)
+        self.assertAlmostEqual(b.inf2(20.0, 12.0, 83.0, PI), attendu, places=8)
 
     def test_inf2_croissant_avec_wd(self):
         self.assertLess(b.inf2(20.0, 4.0, 83.0, P), b.inf2(20.0, 12.0, 83.0, P))
@@ -158,7 +190,7 @@ class TestInfectionPeriode2(unittest.TestCase):
         teq = 20 / 30
         rh_term = 1.0 + math.exp((35.364 - 0.26 * 80) / 100)   # signe + (courbe croissante en HR)
         attendu = 7.75 * teq**2.14 * (1 - teq)**0.469 / rh_term * b.sus3(83.0)
-        self.assertAlmostEqual(b.inf3(20.0, 80.0, 83.0, P), attendu, places=8)
+        self.assertAlmostEqual(b.inf3(20.0, 80.0, 83.0, PI), attendu, places=8)
 
     def test_inf3_croissant_avec_hr(self):
         """HR élevée favorise légèrement l'infection de baie à baie (variation < 10 % sur 60→90 %)."""
