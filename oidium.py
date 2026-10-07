@@ -299,7 +299,7 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
     fin_primaire = debourrement + timedelta(days=pp["fenetre_jours"])
     stock_asc = pp["stock_selon_severite"].get(pp["severite_precedente"], pp["stock_selon_severite"].get(str(pp["severite_precedente"]), 0.0))
     if pp.get("indice_chasmotheces") is not None:
-        stock_asc = max(0.0, min(100.0, float(pp["indice_chasmotheces"]))) / 100.0
+        stock_asc = max(0.0, float(pp["indice_chasmotheces"])) / 100.0      # pas de plafond : 100 = sévérité 3, au-delà = plus
     stock_asc0 = stock_asc
     capacite = p["capacite_colonies"]
     seuil_vis = p["seuil_visible"] * capacite

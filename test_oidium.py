@@ -227,7 +227,7 @@ class TestInfectionPrimaire(unittest.TestCase):
         self.assertAlmostEqual(n(indice_chasmotheces=50) / n(indice_chasmotheces=100), 0.5, delta=0.01)
         self.assertGreater(n(severite=0, indice_chasmotheces=95), 0)                                    # l'indice prime sur la sévérité
         self.assertEqual(n(severite=3, indice_chasmotheces=0), 0.0)
-        self.assertAlmostEqual(n(indice_chasmotheces=150), n(indice_chasmotheces=100), delta=1e-9)             # borné à 100
+        self.assertAlmostEqual(n(indice_chasmotheces=200) / n(indice_chasmotheces=100), 2.0, delta=0.01)     # pas de plafond
         self.assertEqual(n(indice_chasmotheces=-5), 0.0)                                                # et à 0
 
     def test_fenetre_des_ascospores(self):
