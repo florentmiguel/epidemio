@@ -78,6 +78,10 @@ PARAMS: dict = {
     # Fenêtres d'infection (BBCH)
     "fenetre1": {"debut": 53, "fin": 73},
     "fenetre2": {"debut": 79, "fin": 89},
+    # Sous-fenêtres de la fenêtre 2 (CHOIX VITI Sens, l'article fait courir SEV2 et SEV3 sur toute la fenêtre 79-89) :
+    #   SEV2 (conidies sur baies) de la fermeture de la grappe au début de la véraison, SEV3 (baie à baie) de la véraison à la récolte.
+    "fenetre_sev2": {"debut": 79, "fin": 83},
+    "fenetre_sev3": {"debut": 84, "fin": 89},
     # WD proxy : seuils pour compter une heure comme « mouillée »
     "wd_proxy": {"hr_seuil": 90.0, "pluie_seuil": 0.2},
     # Coefficients de l'analyse discriminante (Table 6 de González-Domínguez et al. 2015)
@@ -335,12 +339,15 @@ def calculer_saison(
                 ris1 = ciso * inf1(t_j, wd_j, bbch_j, p)
                 sev1 += ris1
             if in_f2:
-                ris2 = ciso * inf2(t_j, wd_j, bbch_j, p)
-                ris3 = inf3(t_j, hr_j, bbch_j, p) * mg
-                if lien.get("actif"):
-                    ris3 *= sev1 / lien["sev1_ref"]                       # inoculum de grappe issu de la floraison
-                sev2 += ris2
-                sev3 += ris3
+                fs2, fs3 = p["fenetre_sev2"], p["fenetre_sev3"]
+                if fs2["debut"] <= bbch_j <= fs2["fin"]:
+                    ris2 = ciso * inf2(t_j, wd_j, bbch_j, p)
+                    sev2 += ris2
+                if fs3["debut"] <= bbch_j <= fs3["fin"]:
+                    ris3 = inf3(t_j, hr_j, bbch_j, p) * mg
+                    if lien.get("actif"):
+                        ris3 *= sev1 / lien["sev1_ref"]                   # inoculum de grappe issu de la floraison
+                    sev3 += ris3
 
         jours_out.append({
             "date":   j.isoformat(),

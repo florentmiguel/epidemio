@@ -178,6 +178,27 @@ class TestFinFenetreEtLienFloraison(unittest.TestCase):
         self.assertAlmostEqual(avec["sev3"], sans["sev3"] * avec["sev1"] / 1.0, delta=0.02 * sans["sev3"] * avec["sev1"] + 1e-9)
 
 
+class TestSousFenetres(unittest.TestCase):
+    def test_sev2_de_79_a_83_et_sev3_de_84_a_89(self):
+        tz = ZoneInfo("Europe/Paris")
+        rows, bbch, j = [], {}, date(2024, 7, 1)
+        for k in range(40):
+            for h in range(24):
+                rows.append({"t": datetime(j.year, j.month, j.day, h, tzinfo=timezone.utc), "temp": 20.0, "hr": 95.0, "pluie": 0.5})
+            bbch[j] = 65.0 if k < 10 else 79 + (k - 10) * 0.33
+            j += timedelta(days=1)
+        res = b.calculer_saison(rows, bbch, tz)
+        for d in res["jours"]:
+            if d["bbch"] is None:
+                continue
+            if d["ris2"] > 0:
+                self.assertTrue(79 <= d["bbch"] <= 83, d)
+            if d["ris3"] > 0:
+                self.assertTrue(84 <= d["bbch"] <= 89, d)
+        self.assertGreater(res["sev2"], 0)
+        self.assertGreater(res["sev3"], 0)
+
+
 class TestInfectionPeriode1(unittest.TestCase):
 
     def test_inf1_analytique(self):
@@ -307,8 +328,10 @@ class TestMoteurComplet(unittest.TestCase):
         """Lance la simulation avec un BBCH fixe dans la fenêtre voulue."""
         if fenetre == 1:
             b_val = 65.0  # floraison, dans fenêtre 1 [53-73]
+        elif fenetre == 2:
+            b_val = 81.0  # sous-fenêtre SEV2 [79-83]
         else:
-            b_val = 83.0  # véraison, dans fenêtre 2 [79-89]
+            b_val = 86.0  # sous-fenêtre SEV3 [84-89]
         rows = serie(self.DEB, jours, temp, hr, pluie)
         bbch = bbch_fixe(self.DEB, jours, b_val)
         return b.calculer_saison(rows, bbch, TZ, params)
@@ -320,10 +343,14 @@ class TestMoteurComplet(unittest.TestCase):
         self.assertEqual(res["sev3"], 0.0)
 
     def test_sev2_et_sev3_s_accumulent_dans_fenetre_2(self):
-        res = self._run(fenetre=2, params={"lien_floraison": {"actif": False}})    # mécanique de la fenêtre 2 seule (sans floraison simulée)
-        self.assertEqual(res["sev1"], 0.0)
-        self.assertGreater(res["sev2"], 0.0)
-        self.assertGreater(res["sev3"], 0.0)
+        sans_lien = {"lien_floraison": {"actif": False}}           # mécanique de la fenêtre 2 seule (sans floraison simulée)
+        r2 = self._run(fenetre=2, params=sans_lien)
+        r3 = self._run(fenetre=3, params=sans_lien)
+        self.assertEqual(r2["sev1"], 0.0)
+        self.assertGreater(r2["sev2"], 0.0)
+        self.assertEqual(r2["sev3"], 0.0)
+        self.assertEqual(r3["sev2"], 0.0)
+        self.assertGreater(r3["sev3"], 0.0)
 
     def test_pluie_augmente_wd_et_donc_sev1(self):
         """Pluie → plus d'heures mouillées → WD plus grand → SEV1 plus élevé."""
@@ -333,8 +360,8 @@ class TestMoteurComplet(unittest.TestCase):
 
     def test_hr_elevee_augmente_sev3(self):
         """HR élevée favorise l'infection de baie à baie (inf3 ~ HR)."""
-        bas = self._run(hr=60.0, fenetre=2, params={"lien_floraison": {"actif": False}})
-        haut = self._run(hr=95.0, fenetre=2, params={"lien_floraison": {"actif": False}})
+        bas = self._run(hr=60.0, fenetre=3, params={"lien_floraison": {"actif": False}})
+        haut = self._run(hr=95.0, fenetre=3, params={"lien_floraison": {"actif": False}})
         self.assertGreater(haut["sev3"], bas["sev3"])
 
     def test_hors_fenetre_sev_restent_nuls(self):
