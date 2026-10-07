@@ -219,16 +219,16 @@ class TestInfectionPrimaire(unittest.TestCase):
         self.assertEqual(n[0], [])
         self.assertAlmostEqual(n[3][0]["colonies"] / n[1][0]["colonies"], 1.0 / 0.12, delta=0.1)
 
-    def test_l_indice_oidi_remplace_la_severite_et_echelonne_l_inoculum(self):
+    def test_l_indice_chasmotheces_remplace_la_severite_et_echelonne_l_inoculum(self):
         def n(**primaire):
             res = self.run_(self.pluie_le(20), severite=primaire.pop("severite", 2), primaire=primaire)
             return res["primaires"][0]["colonies"] if res["primaires"] else 0.0
-        self.assertAlmostEqual(n(indice_oidi=95) / n(severite=3), 0.95, delta=0.01)            # stock = indice / 100 ; sévérité 3 = stock 1,0
-        self.assertAlmostEqual(n(indice_oidi=50) / n(indice_oidi=100), 0.5, delta=0.01)
-        self.assertGreater(n(severite=0, indice_oidi=95), 0)                                    # l'indice prime sur la sévérité
-        self.assertEqual(n(severite=3, indice_oidi=0), 0.0)
-        self.assertAlmostEqual(n(indice_oidi=150), n(indice_oidi=100), delta=1e-9)             # borné à 100
-        self.assertEqual(n(indice_oidi=-5), 0.0)                                                # et à 0
+        self.assertAlmostEqual(n(indice_chasmotheces=95) / n(severite=3), 0.95, delta=0.01)            # stock = indice / 100 ; sévérité 3 = stock 1,0
+        self.assertAlmostEqual(n(indice_chasmotheces=50) / n(indice_chasmotheces=100), 0.5, delta=0.01)
+        self.assertGreater(n(severite=0, indice_chasmotheces=95), 0)                                    # l'indice prime sur la sévérité
+        self.assertEqual(n(severite=3, indice_chasmotheces=0), 0.0)
+        self.assertAlmostEqual(n(indice_chasmotheces=150), n(indice_chasmotheces=100), delta=1e-9)             # borné à 100
+        self.assertEqual(n(indice_chasmotheces=-5), 0.0)                                                # et à 0
 
     def test_fenetre_des_ascospores(self):
         res = self.run_(self.pluie_le(20), primaire={"fenetre_jours": 3, "debourrement": "2026-04-15"})
@@ -577,7 +577,7 @@ class TestDonneesExternesEnLigneDeCommande(unittest.TestCase):
 
     def test_simulation_affiche_les_donnees_et_le_stade(self):
         with tempfile.TemporaryDirectory() as d:
-            sortie = self.lancer(self.csv_complet(d), "--debourrement", "2026-03-28", "--indice-oidi", "95", "--pas", "30")
+            sortie = self.lancer(self.csv_complet(d), "--debourrement", "2026-03-28", "--indice-chasmotheces", "95", "--pas", "30")
         self.assertIn("vent : 100 % des heures renseignées (actif)", sortie)
         self.assertIn("rayonnement : 100 % (UV actifs)", sortie)
         self.assertIn("phénologie : active", sortie)
@@ -1014,19 +1014,19 @@ class TestChasmotheces(unittest.TestCase):
         self.assertFalse(res["chasmotheces"]["initiation"])
 
     def test_l_indice_fin_de_saison_alimente_la_saison_suivante(self):
-        """L'indice relatif de chasmothèces peut être passé comme indice-oidi de la saison suivante."""
+        """L'indice relatif de chasmothèces peut être passé comme indice-chasmotheces de la saison suivante."""
         def froid(h): return {"temp": 10.0} if h < 8 else {"temp": 20.0, "hr": 85.0}
         res = simuler(serie(heures=24 * 90, regles=froid), infections_initiales=[{"t": "2026-06-01T00:00", "n": 2.0}])
         indice = res["chasmotheces"]["indice"] * 100
         self.assertGreater(indice, 0.0)
         self.assertLessEqual(indice, 100.0)
         # On peut passer cet indice à la saison suivante
-        res2 = oi.calculer_saison(serie(temp=20.0, heures=24 * 10), {"primaire": {"indice_oidi": indice}})
+        res2 = oi.calculer_saison(serie(temp=20.0, heures=24 * 10), {"primaire": {"indice_chasmotheces": indice}})
         self.assertAlmostEqual(res2["stock_ascospores_initial"], res["chasmotheces"]["indice"], delta=0.01)
 
 
-class TestIndiceOidiEnLigneDeCommande(unittest.TestCase):
-    def test_option_indice_oidi(self):
+class TestIndiceChasmothecesEnLigneDeCommande(unittest.TestCase):
+    def test_option_indice_chasmotheces(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["time", "temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation"])
@@ -1036,7 +1036,7 @@ class TestIndiceOidiEnLigneDeCommande(unittest.TestCase):
         try:
             s = io.StringIO()
             with contextlib.redirect_stdout(s):
-                oi.main([chemin, "--indice-oidi", "95", "--severite", "0", "--debourrement", "2026-03-28"])
+                oi.main([chemin, "--indice-chasmotheces", "95", "--severite", "0", "--debourrement", "2026-03-28"])
         finally:
             os.unlink(chemin)
         self.assertIn("stock d'ascospores relatif : 0.95", s.getvalue())                        # l'indice prime sur --severite

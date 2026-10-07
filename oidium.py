@@ -86,9 +86,10 @@ PARAMS = {
         # sévérité de l'oïdium l'année précédente (0 à 3, catégories du mémoire) -> stock d'ascospores relatif (80/320/680 par cm²)
         "stock_selon_severite": {0: 0.0, 1: 0.12, 2: 0.47, 3: 1.0},
         "severite_precedente": 2,
-        # Indice annuel de sortie d'hiver (0 à 100) du modèle Oïdi (Modeline, adapté du SOV) publié dans le BSV : s'il est donné, il remplace la
+        # Indice chasmothèces (0 à 100) : inoculum primaire de la saison, issu de l'indice de formation des chasmothèces calculé par ce
+        # moteur en fin de saison précédente (chasmotheces.indice x 100). S'il est donné, il remplace la
         # sévérité de l'année précédente. Hypothèse v0, à caler : stock d'ascospores relatif = indice / 100.
-        "indice_oidi": None,
+        "indice_chasmotheces": None,
     },
     # Vent : libération des conidies (Eq. 18 de Garin 2011, d'après Willocquet et al. 1998). Actif dès qu'une heure porte une valeur de vent.
     "vent": {
@@ -297,8 +298,8 @@ def calculer_saison(rows: list[dict], params: dict | None = None, now: datetime 
         debourrement = date(annee, 4, 15)
     fin_primaire = debourrement + timedelta(days=pp["fenetre_jours"])
     stock_asc = pp["stock_selon_severite"].get(pp["severite_precedente"], pp["stock_selon_severite"].get(str(pp["severite_precedente"]), 0.0))
-    if pp.get("indice_oidi") is not None:
-        stock_asc = max(0.0, min(100.0, float(pp["indice_oidi"]))) / 100.0
+    if pp.get("indice_chasmotheces") is not None:
+        stock_asc = max(0.0, min(100.0, float(pp["indice_chasmotheces"]))) / 100.0
     stock_asc0 = stock_asc
     capacite = p["capacite_colonies"]
     seuil_vis = p["seuil_visible"] * capacite
@@ -800,7 +801,7 @@ def main(argv=None):
     ap.add_argument("csv")
     ap.add_argument("--debourrement", help="date de débourrement AAAA-MM-JJ (défaut : 15 avril)")
     ap.add_argument("--severite", type=int, choices=(0, 1, 2, 3), help="sévérité de l'oïdium l'année précédente (0 à 3)")
-    ap.add_argument("--indice-oidi", type=float, help="indice de sortie d'hiver 0 à 100 du modèle Oïdi (BSV) ; remplace --severite")
+    ap.add_argument("--indice-chasmotheces", type=float, help="indice chasmothèces 0 à 100 (inoculum primaire, issu de la saison précédente) ; remplace --severite")
     ap.add_argument("--graine", action="append", default=[], help="amorçage manuel : AAAA-MM-JJ[THH:MM] (répétable)")
     ap.add_argument("--multiplication", type=float, help="émission de conidies par colonie et par jour (calage)")
     ap.add_argument("--bbch", nargs="+", metavar="DATE:STADE", help="stades observés (ex. 2026-05-15:17) : recalent la phénologie")
@@ -843,8 +844,8 @@ def main(argv=None):
         surcharge["phenologie"]["observations"] = observations
     if a.debourrement:
         surcharge["primaire"]["debourrement"] = a.debourrement
-    if a.indice_oidi is not None:
-        surcharge["primaire"]["indice_oidi"] = a.indice_oidi
+    if a.indice_chasmotheces is not None:
+        surcharge["primaire"]["indice_chasmotheces"] = a.indice_chasmotheces
     if a.fenetre:
         surcharge["primaire"]["fenetre_jours"] = a.fenetre
     if a.severite is not None:
